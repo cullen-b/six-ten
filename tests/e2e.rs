@@ -414,6 +414,10 @@ fn install_is_idempotent() {
         serde_json::from_str(&fs::read_to_string(dir.join(".claude/settings.json")).unwrap())
             .unwrap();
     assert_eq!(settings["hooks"]["PreToolUse"].as_array().unwrap().len(), 1);
+    assert_eq!(
+        settings["permissions"]["allow"],
+        json!(["mcp__six-ten", "Bash(six-ten:*)"])
+    );
     let claude_md = fs::read_to_string(dir.join("CLAUDE.md")).unwrap();
     assert!(claude_md.starts_with("# Project") && claude_md.matches("six-ten:begin").count() == 1);
     let codex = fs::read_to_string(dir.join(".codex/hooks.json")).unwrap();

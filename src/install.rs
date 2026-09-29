@@ -70,6 +70,16 @@ fn claude(root: &Path) -> Result<()> {
         ("SessionEnd", json!({"hooks": hook})),
     ];
     merge_hooks(hooks, wanted)?;
+    // Agents must be able to call six-ten's own tools without a permission prompt to wait politely.
+    let obj = doc
+        .as_object_mut()
+        .context("settings.json is not an object")?;
+    add_unique(
+        obj.entry("permissions").or_insert(json!({})),
+        "allow",
+        &["mcp__six-ten", "Bash(six-ten:*)"],
+    )?;
+    add_unique(&mut doc, "enabledMcpjsonServers", &[BIN])?;
     write_json(&settings, &doc)?;
 
     let mcp = root.join(".mcp.json");
@@ -167,6 +177,23 @@ fn hermes(root: &Path) -> Result<()> {
          on_session_end:\n    - command: \"{BIN} hook hermes\"\n  on_session_finalize:\n    - command: \"{BIN} hook hermes\"\n\
          mcp_servers:\n  six-ten:\n    command: \"{BIN}\"\n    args: [\"mcp\"]\n"
     );
+    Ok(())
+}
+
+fn add_unique(obj: &mut Value, key: &str, items: &[&str]) -> Result<()> {
+    let list = obj
+        .as_object_mut()
+        .context("expected a JSON object")?
+        .entry(key)
+        .or_insert(json!([]));
+    let arr = list
+        .as_array_mut()
+        .with_context(|| format!("`{key}` is not an array"))?;
+    for item in items {
+        if !arr.iter().any(|v| v == item) {
+            arr.push(json!(item));
+        }
+    }
     Ok(())
 }
 
