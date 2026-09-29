@@ -743,3 +743,47 @@ fn codex_shell_reads_and_other_harness_note_channels() {
         "retry passes"
     );
 }
+
+#[test]
+fn news_arrives_after_any_tool_call() {
+    let dir = repo();
+    hook(
+        &dir,
+        "alice",
+        "claude",
+        tool(&dir, "PostToolUse", "Read", "src/a.rs"),
+    );
+    edit_as(&dir, "bob", "src/a.rs", "a\nbob\n");
+    let after_shell = hook(
+        &dir,
+        "alice",
+        "claude",
+        json!({"hook_event_name": "PostToolUse", "tool_name": "Bash", "cwd": dir, "tool_input": {"command": "cargo check"}}),
+    );
+    let v: Value = serde_json::from_slice(&after_shell.stdout).unwrap();
+    assert_eq!(v["hookSpecificOutput"]["hookEventName"], "PostToolUse");
+    assert!(context(&after_shell).contains("+bob"));
+    assert!(
+        hook(
+            &dir,
+            "alice",
+            "claude",
+            tool(&dir, "PreToolUse", "Edit", "src/b.rs")
+        )
+        .stdout
+        .is_empty(),
+        "already told"
+    );
+    let hermes_after = json!({"hook_event_name": "post_tool_call", "tool_name": "terminal", "cwd": dir, "session_id": "h", "tool_input": {"command": "ls"}});
+    assert!(hook(&dir, "hm", "hermes", hermes_after).stdout.is_empty());
+}
+
+#[test]
+fn rewrite_after_external_revert_is_still_news() {
+    let dir = repo();
+    edit_as(&dir, "bob", "src/a.rs", "a\nnew\n");
+    git(&dir, &["checkout", "-q", "--", "src/a.rs"]);
+    hook(&dir, "alice", "claude", tool(&dir, "PostToolUse", "Read", "src/a.rs"));
+    edit_as(&dir, "bob", "src/a.rs", "a\nnew\n");
+    assert!(context(&hook(&dir, "alice", "claude", tool(&dir, "PreToolUse", "Write", "src/z.rs"))).contains("+new"));
+}

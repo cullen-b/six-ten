@@ -57,7 +57,7 @@ fn respond(harness: &str, kind: &str, decision: Decision) -> i32 {
         Decision::Allow => 0,
         Decision::Deny(reason) | Decision::Stale(reason) => block(reason),
         Decision::Note(note) => match (harness, kind) {
-            ("claude" | "codex", "PreToolUse" | "UserPromptSubmit") => {
+            ("claude" | "codex", "PreToolUse" | "PostToolUse" | "UserPromptSubmit") => {
                 println!(
                     "{}",
                     json!({"hookSpecificOutput": {"hookEventName": kind, "additionalContext": note}})
@@ -99,7 +99,15 @@ pub fn handle(harness: &str, payload: &Value) -> Result<Decision> {
         Some(s) => base.sub(s),
         None => base,
     };
-    let done = |r: Result<()>| r.map(|_| Decision::Allow);
+    // After a tool call, pass on news right away; Hermes cannot annotate a finished call.
+    let done = |r: Result<()>| {
+        r?;
+        if harness == "hermes" {
+            Ok(Decision::Allow)
+        } else {
+            policy::news(&store, &agent)
+        }
+    };
     match event {
         Event::PreEdit(paths) => policy::pre_edit(&store, &agent, &cwd, &paths),
         Event::PreShell(command) => {

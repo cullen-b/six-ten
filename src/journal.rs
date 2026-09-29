@@ -68,10 +68,6 @@ impl Store {
     pub fn record_write(&self, agent_id: &str, path: &str, after: Option<String>) -> Result<()> {
         self.locked(|| {
             let entries = self.entries()?;
-            let last = entries.iter().rev().find(|e| e.path == path);
-            if last.is_some_and(|e| e.after == after) {
-                return Ok(());
-            }
             let seq = entries.last().map_or(0, |e| e.seq) + 1;
             let entry = Entry {
                 seq,

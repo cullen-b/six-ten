@@ -44,6 +44,15 @@ Commit the generated files so every agent (and teammate) gets them.
   agent has uncommitted work, `git stash`, `reset --hard`, `checkout`/`switch`, `restore`, `clean`,
   `pull`, `merge` and `rebase` are blocked if they would touch it, and `six-ten precommit` refuses
   commits that include it (`SIX_TEN_ALLOW_COMMIT=1` to override).
+- **Stale context.** Every completed write goes into a journal (`journal.jsonl`, contents kept as git
+  blobs), and six-ten tracks what each agent last read. When another agent changes a file you have
+  read, you are told once, with a compact diff:
+  - right after your next tool call (Claude Code/Codex `additionalContext`, appended to the tool
+    result in OpenCode), at your next turn start, or in a `six_ten_wait` result;
+  - if you are about to write that very file, the write is refused once with the diff (the lease is
+    kept), so you re-read before overwriting; the retry goes through;
+  - files others changed during your turn that you never read are listed by name.
+  Hermes shell hooks can't annotate a call, so there the next write is refused once with the note.
 - **Fail open.** If six-ten itself errors, or the directory isn't a git repo, the edit is allowed.
 
 ## CLI
@@ -62,8 +71,9 @@ MCP tools: `six_ten_claim`, `six_ten_wait`, `six_ten_release`, `six_ten_status`.
 
 - Detecting shell writes is best-effort. A script that writes files (`python gen.py`) isn't seen until
   commit time, where the pre-commit check still catches collisions.
-- Two agents editing *different* files can still break each other's build; six-ten prevents clobbered
-  files, not semantic conflicts.
+- Stale-context notes cover files an agent has read or written; a change to a file it only depends on
+  indirectly (never opened) shows up by name only. Codex reads are inferred from shell commands.
+- Agent identity is the harness process, so a resumed session (`--resume`) starts with a fresh view.
 - macOS and Linux only (uses `ps` and `flock`).
 
 ## Development

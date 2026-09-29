@@ -33,8 +33,8 @@ export const SixTen = async ({ directory }: { directory: string }) => ({
     if (n) pending.set(input.callID, n)
   },
   "tool.execute.after": async (input: { tool: string; sessionID: string; callID: string; args: unknown }, output: { output: string }) => {
-    await sixTen({ event: "tool.execute.after", tool: input.tool, sessionID: input.sessionID, args: input.args, directory })
-    const notes = [turnNotes.get(input.sessionID), pending.get(input.callID)].filter(Boolean)
+    const r = await sixTen({ event: "tool.execute.after", tool: input.tool, sessionID: input.sessionID, args: input.args, directory })
+    const notes = [turnNotes.get(input.sessionID), pending.get(input.callID), note(r.stdout)].filter(Boolean)
     turnNotes.delete(input.sessionID)
     pending.delete(input.callID)
     if (notes.length) output.output = `${output.output}\n\n${notes.join("\n\n")}`

@@ -162,6 +162,11 @@ pub fn post_read(store: &Store, agent: &Agent, cwd: &Path, raw_paths: &[String])
     Ok(())
 }
 
+/// Changes to files the agent has seen that it has not been told about yet.
+pub fn news(store: &Store, agent: &Agent) -> Result<Decision> {
+    catch_up(store, agent, &[])
+}
+
 /// Start of a turn: report what changed since the last one, then reset the turn cursor.
 pub fn turn_start(store: &Store, agent: &Agent) -> Result<Decision> {
     let decision = catch_up(store, agent, &[])?;
