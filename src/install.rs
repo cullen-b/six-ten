@@ -65,6 +65,11 @@ fn claude(root: &Path) -> Result<()> {
             "PreToolUse",
             json!({"matcher": "^(Edit|Write|MultiEdit|NotebookEdit|Bash)$", "hooks": hook}),
         ),
+        (
+            "PostToolUse",
+            json!({"matcher": "^(Read|Edit|Write|MultiEdit|NotebookEdit|Bash)$", "hooks": hook}),
+        ),
+        ("UserPromptSubmit", json!({"hooks": hook})),
         ("Stop", json!({"hooks": hook})),
         ("SubagentStop", json!({"hooks": hook})),
         ("SessionEnd", json!({"hooks": hook})),
@@ -113,6 +118,11 @@ fn codex(root: &Path) -> Result<()> {
             "PreToolUse",
             json!({"matcher": "apply_patch|Bash", "hooks": hook(30)}),
         ),
+        (
+            "PostToolUse",
+            json!({"matcher": "apply_patch|Bash", "hooks": hook(30)}),
+        ),
+        ("UserPromptSubmit", json!({"hooks": hook(30)})),
         ("Stop", json!({"hooks": hook(30)})),
         ("SubagentStop", json!({"hooks": hook(30)})),
         ("SessionEnd", json!({"hooks": hook(3)})),
@@ -174,6 +184,8 @@ fn hermes(root: &Path) -> Result<()> {
     println!(
         "hermes: protocol in AGENTS.md. Hermes config is global; add this to ~/.hermes/config.yaml:\n\n\
          hooks:\n  pre_tool_call:\n    - matcher: \"write_file|patch|terminal\"\n      command: \"{BIN} hook hermes\"\n      timeout: 30\n  \
+         post_tool_call:\n    - matcher: \"read_file|write_file|patch|terminal\"\n      command: \"{BIN} hook hermes\"\n  \
+         pre_llm_call:\n    - command: \"{BIN} hook hermes\"\n  \
          on_session_end:\n    - command: \"{BIN} hook hermes\"\n  on_session_finalize:\n    - command: \"{BIN} hook hermes\"\n\
          mcp_servers:\n  six-ten:\n    command: \"{BIN}\"\n    args: [\"mcp\"]\n"
     );

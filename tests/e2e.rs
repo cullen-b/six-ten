@@ -446,3 +446,300 @@ fn install_is_idempotent() {
         1
     );
 }
+
+fn tool(dir: &Path, event: &str, tool: &str, file: &str) -> Value {
+    json!({"hook_event_name": event, "tool_name": tool, "cwd": dir, "tool_input": {"file_path": dir.join(file)}})
+}
+
+/// A full edit by `agent` through the Claude hooks: pre-check, write, post-record, end of turn.
+fn edit_as(dir: &Path, agent: &str, file: &str, content: &str) {
+    assert_eq!(
+        hook(dir, agent, "claude", tool(dir, "PreToolUse", "Edit", file))
+            .status
+            .code(),
+        Some(0)
+    );
+    fs::write(dir.join(file), content).unwrap();
+    hook(dir, agent, "claude", tool(dir, "PostToolUse", "Edit", file));
+    hook(
+        dir,
+        agent,
+        "claude",
+        json!({"hook_event_name": "Stop", "cwd": dir}),
+    );
+}
+
+fn context(o: &Output) -> String {
+    let v: Value = serde_json::from_slice(&o.stdout).unwrap_or(Value::Null);
+    v["hookSpecificOutput"]["additionalContext"]
+        .as_str()
+        .unwrap_or_default()
+        .to_string()
+}
+
+#[test]
+fn stale_target_is_refused_once_with_a_diff() {
+    let dir = repo();
+    hook(
+        &dir,
+        "alice",
+        "claude",
+        tool(&dir, "PostToolUse", "Read", "src/a.rs"),
+    );
+    edit_as(&dir, "bob", "src/a.rs", "a\nbob was here\n");
+    let first = hook(
+        &dir,
+        "alice",
+        "claude",
+        tool(&dir, "PreToolUse", "Edit", "src/a.rs"),
+    );
+    assert_eq!(first.status.code(), Some(2));
+    let msg = stderr(&first);
+    assert!(
+        msg.contains("you now hold `src/a.rs`")
+            && msg.contains("+bob was here")
+            && msg.contains("changed by bob"),
+        "{msg}"
+    );
+    let retry = hook(
+        &dir,
+        "alice",
+        "claude",
+        tool(&dir, "PreToolUse", "Edit", "src/a.rs"),
+    );
+    assert_eq!(retry.status.code(), Some(0));
+    assert!(retry.stdout.is_empty());
+}
+
+#[test]
+fn changes_to_files_read_earlier_arrive_as_a_note_once() {
+    let dir = repo();
+    fs::write(dir.join("src/api.rs"), "pub fn foo(a: u8) {}\n").unwrap();
+    hook(
+        &dir,
+        "alice",
+        "claude",
+        tool(&dir, "PostToolUse", "Read", "src/api.rs"),
+    );
+    edit_as(&dir, "bob", "src/api.rs", "pub fn foo(a: u8, b: u8) {}\n");
+    let out = hook(
+        &dir,
+        "alice",
+        "claude",
+        tool(&dir, "PreToolUse", "Write", "src/main.rs"),
+    );
+    assert_eq!(out.status.code(), Some(0));
+    let note = context(&out);
+    assert!(
+        note.contains("files you read earlier")
+            && note.contains("+pub fn foo(a: u8, b: u8) {}")
+            && note.contains("-pub fn foo(a: u8) {}"),
+        "{note}"
+    );
+    let again = hook(
+        &dir,
+        "alice",
+        "claude",
+        tool(&dir, "PreToolUse", "Write", "src/main.rs"),
+    );
+    assert!(again.stdout.is_empty(), "told only once");
+}
+
+#[test]
+fn own_and_family_edits_are_not_reported() {
+    let dir = repo();
+    hook(
+        &dir,
+        "alice",
+        "claude",
+        tool(&dir, "PostToolUse", "Read", "src/a.rs"),
+    );
+    edit_as(&dir, "alice", "src/a.rs", "mine\n");
+    let mut sub = tool(&dir, "PreToolUse", "Edit", "src/b.rs");
+    sub["agent_id"] = json!("helper");
+    hook(
+        &dir,
+        "alice",
+        "claude",
+        tool(&dir, "PostToolUse", "Read", "src/b.rs"),
+    );
+    assert_eq!(
+        hook(&dir, "alice", "claude", sub.clone()).status.code(),
+        Some(0)
+    );
+    fs::write(dir.join("src/b.rs"), "helper\n").unwrap();
+    sub["hook_event_name"] = json!("PostToolUse");
+    hook(&dir, "alice", "claude", sub);
+    let sub_stop = json!({"hook_event_name": "SubagentStop", "cwd": dir, "agent_id": "helper"});
+    hook(&dir, "alice", "claude", sub_stop);
+    let out = hook(
+        &dir,
+        "alice",
+        "claude",
+        tool(&dir, "PreToolUse", "Edit", "src/b.rs"),
+    );
+    assert_eq!(out.status.code(), Some(0));
+    assert!(
+        out.stdout.is_empty(),
+        "{}",
+        String::from_utf8_lossy(&out.stdout)
+    );
+}
+
+#[test]
+fn turn_start_and_wait_deliver_pending_changes() {
+    let dir = repo();
+    hook(
+        &dir,
+        "alice",
+        "claude",
+        tool(&dir, "PostToolUse", "Read", "src/a.rs"),
+    );
+    edit_as(&dir, "bob", "src/a.rs", "a\nbob 1\n");
+    let turn = hook(
+        &dir,
+        "alice",
+        "claude",
+        json!({"hook_event_name": "UserPromptSubmit", "cwd": dir, "prompt": "go"}),
+    );
+    let v: Value = serde_json::from_slice(&turn.stdout).unwrap();
+    assert_eq!(v["hookSpecificOutput"]["hookEventName"], "UserPromptSubmit");
+    assert!(context(&turn).contains("+bob 1"));
+
+    // Bob holds the file and changes it while alice waits; the wait result carries the diff.
+    assert_eq!(
+        hook(
+            &dir,
+            "bob",
+            "claude",
+            tool(&dir, "PreToolUse", "Edit", "src/a.rs")
+        )
+        .status
+        .code(),
+        Some(0)
+    );
+    let waiter = Command::new(BIN)
+        .current_dir(&dir)
+        .env("SIX_TEN_AGENT", "alice")
+        .args(["wait", "src/a.rs", "--timeout", "10"])
+        .stdout(Stdio::piped())
+        .spawn()
+        .unwrap();
+    fs::write(dir.join("src/a.rs"), "a\nbob 1\nbob 2\n").unwrap();
+    hook(
+        &dir,
+        "bob",
+        "claude",
+        tool(&dir, "PostToolUse", "Edit", "src/a.rs"),
+    );
+    std::thread::sleep(std::time::Duration::from_millis(400));
+    hook(
+        &dir,
+        "bob",
+        "claude",
+        json!({"hook_event_name": "Stop", "cwd": dir}),
+    );
+    let out = waiter.wait_with_output().unwrap();
+    assert!(out.status.success());
+    let text = String::from_utf8(out.stdout).unwrap();
+    assert!(
+        text.contains("claimed src/a.rs") && text.contains("+bob 2"),
+        "{text}"
+    );
+    assert_eq!(
+        hook(
+            &dir,
+            "alice",
+            "claude",
+            tool(&dir, "PreToolUse", "Edit", "src/a.rs")
+        )
+        .status
+        .code(),
+        Some(0),
+        "wait already told alice"
+    );
+}
+
+#[test]
+fn unread_changes_are_listed_once_and_big_diffs_are_summarized() {
+    let dir = repo();
+    hook(
+        &dir,
+        "alice",
+        "claude",
+        json!({"hook_event_name": "UserPromptSubmit", "cwd": dir, "prompt": "go"}),
+    );
+    hook(
+        &dir,
+        "alice",
+        "claude",
+        tool(&dir, "PostToolUse", "Read", "src/a.rs"),
+    );
+    edit_as(&dir, "bob", "src/b.rs", "b changed\n");
+    let big: String = (0..300).map(|i| format!("line {i}\n")).collect();
+    edit_as(&dir, "bob", "src/a.rs", &big);
+    let note = context(&hook(
+        &dir,
+        "alice",
+        "claude",
+        tool(&dir, "PreToolUse", "Write", "src/new.rs"),
+    ));
+    assert!(note.contains("during your turn: src/b.rs"), "{note}");
+    assert!(
+        note.contains("changed substantially (+300/-1 lines)"),
+        "{note}"
+    );
+    assert!(
+        hook(
+            &dir,
+            "alice",
+            "claude",
+            tool(&dir, "PreToolUse", "Write", "src/new2.rs")
+        )
+        .stdout
+        .is_empty()
+    );
+}
+
+#[test]
+fn codex_shell_reads_and_other_harness_note_channels() {
+    let dir = repo();
+    let codex_read = json!({"hook_event_name": "PostToolUse", "tool_name": "Bash", "cwd": dir, "tool_input": {"command": "sed -n '1,40p' src/a.rs"}});
+    hook(&dir, "cx", "codex", codex_read);
+    let oc_read = json!({"event": "tool.execute.after", "tool": "read", "sessionID": "s", "directory": dir, "args": {"filePath": dir.join("src/a.rs")}});
+    hook(&dir, "oc", "opencode", oc_read);
+    let hermes_read = json!({"hook_event_name": "post_tool_call", "tool_name": "read_file", "cwd": dir, "session_id": "h", "tool_input": {"path": "src/a.rs"}});
+    hook(&dir, "hm", "hermes", hermes_read);
+    edit_as(&dir, "bob", "src/a.rs", "a\nfrom bob\n");
+
+    let codex = hook(
+        &dir,
+        "cx",
+        "codex",
+        json!({"hook_event_name": "PreToolUse", "tool_name": "apply_patch", "cwd": dir,
+        "tool_input": {"command": "*** Begin Patch\n*** Add File: src/c.rs\n+x\n*** End Patch"}}),
+    );
+    assert!(context(&codex).contains("+from bob"));
+    let oc = hook(
+        &dir,
+        "oc",
+        "opencode",
+        json!({"event": "tool.execute.before", "tool": "write", "sessionID": "s", "directory": dir, "args": {"filePath": "src/d.rs"}}),
+    );
+    let v: Value = serde_json::from_slice(&oc.stdout).unwrap();
+    assert!(v["note"].as_str().unwrap().contains("+from bob"));
+    let hermes_write = json!({"hook_event_name": "pre_tool_call", "tool_name": "write_file", "cwd": dir, "session_id": "h", "tool_input": {"path": "src/e.rs"}});
+    let first: Value =
+        serde_json::from_slice(&hook(&dir, "hm", "hermes", hermes_write.clone()).stdout).unwrap();
+    assert_eq!(first["decision"], "block");
+    assert!(
+        first["reason"]
+            .as_str()
+            .unwrap()
+            .contains("Retry the same call now")
+    );
+    assert!(
+        hook(&dir, "hm", "hermes", hermes_write).stdout.is_empty(),
+        "retry passes"
+    );
+}

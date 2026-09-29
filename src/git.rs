@@ -34,6 +34,78 @@ pub fn dirty(root: &Path, only: &[String]) -> Result<HashSet<String>> {
     Ok(set)
 }
 
+const MAX_BLOB: u64 = 1 << 20;
+
+/// Stores `rel`'s current content in the object DB and returns its blob id; None if it doesn't exist.
+/// Files over 1MB get a size/mtime stand-in so they are tracked for changes but never diffed.
+pub fn blob(root: &Path, rel: &str) -> Option<String> {
+    let meta = std::fs::metadata(root.join(rel))
+        .ok()
+        .filter(|m| m.is_file())?;
+    if meta.len() > MAX_BLOB {
+        let mtime = meta
+            .modified()
+            .ok()?
+            .duration_since(std::time::UNIX_EPOCH)
+            .ok()?
+            .as_nanos();
+        return Some(format!("big:{}:{mtime}", meta.len()));
+    }
+    let out = Command::new("git")
+        .arg("-C")
+        .arg(root)
+        .args(["hash-object", "-w", "--"])
+        .arg(rel)
+        .output()
+        .ok()?;
+    out.status
+        .success()
+        .then(|| String::from_utf8_lossy(&out.stdout).trim().to_string())
+}
+
+/// Unified diff from `old` to `new` (None = absent), or a one-line summary when over `max_lines`.
+pub fn diff_blobs(root: &Path, old: Option<&str>, new: Option<&str>, max_lines: usize) -> String {
+    let (old, new) = match (old, new) {
+        (_, None) => return "the file was deleted.".into(),
+        (o, Some(n)) if o.is_some_and(|o| o.starts_with("big:")) || n.starts_with("big:") => {
+            return "large file changed; re-read the parts you rely on.".into();
+        }
+        (o, Some(n)) => (
+            o.map(String::from).unwrap_or_else(|| empty_blob(root)),
+            n.to_string(),
+        ),
+    };
+    let out = Command::new("git")
+        .arg("-C")
+        .arg(root)
+        .args(["diff", "--no-color", "--no-ext-diff", "-U2", &old, &new])
+        .output();
+    let text = match out {
+        Ok(o) if o.status.success() => String::from_utf8_lossy(&o.stdout).into_owned(),
+        _ => return "changed (diff unavailable); re-read it.".into(),
+    };
+    let body: Vec<&str> = text.lines().skip_while(|l| !l.starts_with("@@")).collect();
+    let added = body.iter().filter(|l| l.starts_with('+')).count();
+    let removed = body.iter().filter(|l| l.starts_with('-')).count();
+    if body.len() > max_lines {
+        return format!("changed substantially (+{added}/-{removed} lines); re-read it.");
+    }
+    body.join("\n")
+}
+
+fn empty_blob(root: &Path) -> String {
+    let out = Command::new("git")
+        .arg("-C")
+        .arg(root)
+        .args(["hash-object", "-w", "-t", "blob", "--stdin"])
+        .stdin(std::process::Stdio::null())
+        .output();
+    out.ok()
+        .filter(|o| o.status.success())
+        .map(|o| String::from_utf8_lossy(&o.stdout).trim().to_string())
+        .unwrap_or_else(|| "e69de29bb2d1d6434b8b29ae775ad8c2e48c5391".into())
+}
+
 /// Paths staged for the next commit.
 pub fn staged(root: &Path) -> Result<Vec<String>> {
     let out = Command::new("git")

@@ -38,7 +38,7 @@ pub enum Claim {
 /// Lease store for one repository: one JSON file per leased path, mutations serialized by an flock.
 pub struct Store {
     root: PathBuf,
-    dir: PathBuf,
+    pub(crate) dir: PathBuf,
 }
 
 pub fn now() -> u64 {
@@ -71,7 +71,7 @@ impl Store {
     }
 
     pub fn at(root: PathBuf, dir: PathBuf) -> Result<Store> {
-        for sub in ["locks", "touched"] {
+        for sub in ["locks", "touched", "seen"] {
             fs::create_dir_all(dir.join(sub))
                 .with_context(|| format!("creating {}", dir.display()))?;
         }
@@ -287,7 +287,7 @@ impl Store {
             .join(format!("{}.json", hex_sha(agent_id)))
     }
 
-    fn locked<T>(&self, f: impl FnOnce() -> Result<T>) -> Result<T> {
+    pub(crate) fn locked<T>(&self, f: impl FnOnce() -> Result<T>) -> Result<T> {
         let mutex: File = OpenOptions::new()
             .create(true)
             .truncate(false)
@@ -308,18 +308,18 @@ pub fn blocks(holder: &str, me: &str) -> bool {
             .is_some_and(|rest| rest.starts_with('/'))
 }
 
-fn hex_sha(s: &str) -> String {
+pub(crate) fn hex_sha(s: &str) -> String {
     Sha256::digest(s.as_bytes())
         .iter()
         .map(|b| format!("{b:02x}"))
         .collect()
 }
 
-fn read_json<T: for<'de> Deserialize<'de>>(path: &Path) -> Option<T> {
+pub(crate) fn read_json<T: for<'de> Deserialize<'de>>(path: &Path) -> Option<T> {
     serde_json::from_slice(&fs::read(path).ok()?).ok()
 }
 
-fn write_json<T: Serialize>(path: &Path, value: &T) -> Result<()> {
+pub(crate) fn write_json<T: Serialize>(path: &Path, value: &T) -> Result<()> {
     let tmp = path.with_extension(format!("tmp.{}", std::process::id()));
     fs::write(&tmp, serde_json::to_vec_pretty(value)?)?;
     fs::rename(&tmp, path)?;

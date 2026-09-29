@@ -2,6 +2,7 @@ mod agent;
 mod git;
 mod hook;
 mod install;
+mod journal;
 mod mcp;
 mod policy;
 mod store;
@@ -71,12 +72,12 @@ fn main() -> ExitCode {
 
 fn run(command: Command) -> Result<u8> {
     let cwd = std::env::current_dir()?;
-    let decided = |d: Decision, ok: String| match d {
-        Decision::Allow => {
-            println!("{ok}");
+    let decided = |d: Decision, ok: String| match d.granted_text(ok) {
+        Ok(text) => {
+            println!("{text}");
             0
         }
-        Decision::Deny(reason) => {
+        Err(reason) => {
             eprintln!("{reason}");
             2
         }
@@ -120,7 +121,8 @@ fn run(command: Command) -> Result<u8> {
                     Ok(0)
                 }
                 Command::Gc => {
-                    println!("removed {} stale record(s)", store.gc()?);
+                    let removed = store.gc()? + store.trim_journal(24 * 60 * 60)?;
+                    println!("removed {removed} stale record(s)");
                     Ok(0)
                 }
                 Command::Precommit => {

@@ -87,19 +87,16 @@ fn call(cwd: &Path, agent: &Agent, name: &str, args: &Value) -> Result<(String, 
         .unwrap_or_default();
     Ok(match name {
         "six_ten_status" => (crate::status_text(&store, agent)?, true),
-        "six_ten_claim" => match policy::pre_edit(&store, agent, cwd, &paths)? {
-            Decision::Allow => (format!("claimed: {}", paths.join(", ")), true),
-            Decision::Deny(reason) => (reason, false),
-        },
+        "six_ten_claim" => reply(
+            policy::pre_edit(&store, agent, cwd, &paths)?,
+            format!("claimed: {}", paths.join(", ")),
+        ),
         "six_ten_wait" => {
             let secs = args["timeout_seconds"].as_u64().unwrap_or(300).min(1800);
-            match policy::wait(&store, agent, cwd, &paths, Duration::from_secs(secs))? {
-                Decision::Allow => (
-                    format!("free and claimed for you: {}", paths.join(", ")),
-                    true,
-                ),
-                Decision::Deny(reason) => (reason, false),
-            }
+            reply(
+                policy::wait(&store, agent, cwd, &paths, Duration::from_secs(secs))?,
+                format!("free and claimed for you: {}", paths.join(", ")),
+            )
         }
         "six_ten_release" => {
             let only = (!paths.is_empty()).then(|| {
@@ -120,6 +117,13 @@ fn call(cwd: &Path, agent: &Agent, name: &str, args: &Value) -> Result<(String, 
         }
         other => (format!("unknown tool {other}"), false),
     })
+}
+
+fn reply(decision: Decision, ok: String) -> (String, bool) {
+    match decision.granted_text(ok) {
+        Ok(text) => (text, true),
+        Err(reason) => (reason, false),
+    }
 }
 
 fn tools() -> Value {

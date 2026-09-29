@@ -6,12 +6,32 @@ use anyhow::Result;
 
 use crate::agent::Agent;
 use crate::git::{self, Clobber};
+use crate::journal::StaleFile;
 use crate::store::{Claim, Lease, Store, now};
 
 pub enum Decision {
     Allow,
+    /// Allowed; tell the agent this first.
+    Note(String),
+    /// Lease granted, but the target changed since the agent last saw it: refuse this write once.
+    Stale(String),
+    /// Held by another agent, or otherwise refused.
     Deny(String),
 }
+
+impl Decision {
+    /// Text for CLI/MCP callers, where a granted claim is a success even if it carries news.
+    pub fn granted_text(self, ok: String) -> Result<String, String> {
+        match self {
+            Decision::Allow => Ok(ok),
+            Decision::Note(n) | Decision::Stale(n) => Ok(format!("{ok}\n\n{n}")),
+            Decision::Deny(reason) => Err(reason),
+        }
+    }
+}
+
+const FILE_DIFF_LINES: usize = 80;
+const NOTE_CHARS: usize = 6000;
 
 pub fn ttl() -> u64 {
     std::env::var("SIX_TEN_TTL")
@@ -40,10 +60,113 @@ pub fn pre_edit(
                 .cloned()
                 .collect();
             store.touch(agent, &paths, &clean)?;
-            Ok(Decision::Allow)
+            catch_up(store, agent, &paths)
         }
         Claim::Conflict(leases) => Ok(Decision::Deny(conflict_message(&leases))),
     }
+}
+
+/// Tells `agent` what other agents changed in files it has seen, before it writes `targets`.
+fn catch_up(store: &Store, agent: &Agent, targets: &[String]) -> Result<Decision> {
+    let stale = store.take_stale(&agent.id, targets)?;
+    if stale.is_empty() {
+        return Ok(Decision::Allow);
+    }
+    let mut out = String::new();
+    if !stale.targets.is_empty() {
+        let names: Vec<String> = stale
+            .targets
+            .iter()
+            .map(|t| format!("`{}`", t.path))
+            .collect();
+        out.push_str(&format!(
+            "six-ten: you now hold {}, but other agents changed it since you last saw it, so this write was \
+             stopped once. Your lease is kept. Re-read what you need, adjust your edit to the current content, \
+             and retry.\n",
+            names.join(", ")
+        ));
+        render(store, &stale.targets, &mut out);
+    }
+    if !stale.seen.is_empty() {
+        out.push_str(
+            "six-ten: other agents changed files you read earlier. Check that your plan still fits \
+             (signatures, names, behaviour) before continuing:\n",
+        );
+        render(store, &stale.seen, &mut out);
+    }
+    if !stale.unseen.is_empty() {
+        out.push_str(&format!(
+            "Also changed by other agents during your turn: {}\n",
+            stale.unseen.join(", ")
+        ));
+    }
+    let out = out.trim_end().to_string();
+    Ok(if stale.targets.is_empty() {
+        Decision::Note(out)
+    } else {
+        Decision::Stale(out)
+    })
+}
+
+/// Appends per-file diffs, smallest first, until the note budget runs out.
+fn render(store: &Store, files: &[StaleFile], out: &mut String) {
+    let mut diffs: Vec<(String, String)> = files
+        .iter()
+        .map(|f| {
+            let by: Vec<&str> = f.by.iter().map(String::as_str).collect();
+            let head = format!("--- {} (changed by {})", f.path, by.join(", "));
+            let body = match &f.seen {
+                None => "you have not read it yet; read it before writing.".to_string(),
+                Some(seen) => git::diff_blobs(
+                    store.root(),
+                    seen.as_deref(),
+                    f.now.as_deref(),
+                    FILE_DIFF_LINES,
+                ),
+            };
+            (head, body)
+        })
+        .collect();
+    diffs.sort_by_key(|(_, body)| body.len());
+    let mut skipped = Vec::new();
+    for (head, body) in diffs {
+        if out.len() + head.len() + body.len() > NOTE_CHARS {
+            skipped.push(head.trim_start_matches("--- ").to_string());
+            continue;
+        }
+        out.push_str(&format!("{head}\n{body}\n"));
+    }
+    if !skipped.is_empty() {
+        out.push_str(&format!(
+            "Also changed (re-read them): {}\n",
+            skipped.join("; ")
+        ));
+    }
+}
+
+/// Records completed writes so other agents can be told about them.
+pub fn post_write(store: &Store, agent: &Agent, cwd: &Path, raw_paths: &[String]) -> Result<()> {
+    for path in normalize_all(store, cwd, raw_paths) {
+        store.record_write(&agent.id, &path, git::blob(store.root(), &path))?;
+    }
+    Ok(())
+}
+
+/// Records what the agent has read, as the baseline for later change notes.
+pub fn post_read(store: &Store, agent: &Agent, cwd: &Path, raw_paths: &[String]) -> Result<()> {
+    for path in normalize_all(store, cwd, raw_paths) {
+        if store.root().join(&path).is_file() {
+            store.record_read(&agent.id, &path, git::blob(store.root(), &path))?;
+        }
+    }
+    Ok(())
+}
+
+/// Start of a turn: report what changed since the last one, then reset the turn cursor.
+pub fn turn_start(store: &Store, agent: &Agent) -> Result<Decision> {
+    let decision = catch_up(store, agent, &[])?;
+    store.record_turn_start(&agent.id)?;
+    Ok(decision)
 }
 
 /// Blocks shell commands that would discard or rewrite other agents' uncommitted work.
@@ -146,7 +269,7 @@ pub fn wait(
 ) -> Result<Decision> {
     let paths = normalize_all(store, cwd, raw_paths);
     match store.wait(agent, &paths, ttl(), timeout)? {
-        Claim::Granted => Ok(Decision::Allow),
+        Claim::Granted => catch_up(store, agent, &paths),
         Claim::Conflict(leases) => Ok(Decision::Deny(format!(
             "still busy after {}s. {}",
             timeout.as_secs(),

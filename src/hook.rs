@@ -2,7 +2,7 @@ use std::io::Read;
 use std::path::PathBuf;
 
 use anyhow::{Result, bail};
-use serde_json::Value;
+use serde_json::{Value, json};
 
 use crate::agent::Agent;
 use crate::policy::{self, Decision};
@@ -13,43 +13,28 @@ use crate::store::Store;
 pub enum Event {
     PreEdit(Vec<String>),
     PreShell(String),
+    PostWrite(Vec<String>),
+    PostRead(Vec<String>),
+    PostShell(String),
+    TurnStart,
     End,
     Ignore,
 }
 
-/// How a harness wants to be told a tool call is blocked.
-enum Reply {
-    ExitCode,
-    HermesJson,
-}
-
-/// Reads one hook payload from stdin; returns the process exit code (2 = blocked, reason on stderr).
+/// Reads one hook payload from stdin and answers in the harness's own protocol; returns the exit code.
 pub fn run(harness: &str) -> i32 {
     let mut input = String::new();
     if let Err(e) = std::io::stdin().read_to_string(&mut input) {
         eprintln!("six-ten: could not read hook input: {e}");
         return 0;
     }
-    let reply = if harness == "hermes" {
-        Reply::HermesJson
-    } else {
-        Reply::ExitCode
-    };
-    match handle(harness, &input) {
-        Ok(Decision::Allow) => 0,
-        Ok(Decision::Deny(reason)) => match reply {
-            Reply::HermesJson => {
-                println!(
-                    "{}",
-                    serde_json::json!({"decision": "block", "reason": reason})
-                );
-                0
-            }
-            Reply::ExitCode => {
-                eprintln!("{reason}");
-                2
-            }
-        },
+    let payload: Value = serde_json::from_str(&input).unwrap_or(Value::Null);
+    let kind = ["hook_event_name", "event"]
+        .iter()
+        .find_map(|k| payload[*k].as_str())
+        .unwrap_or_default();
+    match handle(harness, &payload) {
+        Ok(decision) => respond(harness, kind, decision),
         // Fail open: a broken coordinator must never wedge the agent.
         Err(e) => {
             eprintln!("six-ten: hook error (edit allowed): {e:#}");
@@ -58,9 +43,45 @@ pub fn run(harness: &str) -> i32 {
     }
 }
 
-pub fn handle(harness: &str, input: &str) -> Result<Decision> {
-    let payload: Value = serde_json::from_str(input)?;
-    let (event, sub) = parse(harness, &payload)?;
+fn respond(harness: &str, kind: &str, decision: Decision) -> i32 {
+    let block = |reason: String| {
+        if harness == "hermes" {
+            println!("{}", json!({"decision": "block", "reason": reason}));
+            0
+        } else {
+            eprintln!("{reason}");
+            2
+        }
+    };
+    match decision {
+        Decision::Allow => 0,
+        Decision::Deny(reason) | Decision::Stale(reason) => block(reason),
+        Decision::Note(note) => match (harness, kind) {
+            ("claude" | "codex", "PreToolUse" | "UserPromptSubmit") => {
+                println!(
+                    "{}",
+                    json!({"hookSpecificOutput": {"hookEventName": kind, "additionalContext": note}})
+                );
+                0
+            }
+            ("hermes", "pre_llm_call") => {
+                println!("{}", json!({"context": note}));
+                0
+            }
+            // Hermes shell hooks cannot annotate an allowed call, so refuse it once with the note.
+            ("hermes", _) => block(format!(
+                "{note}\n\n(Nothing was changed. Retry the same call now.)"
+            )),
+            _ => {
+                println!("{}", json!({"note": note}));
+                0
+            }
+        },
+    }
+}
+
+pub fn handle(harness: &str, payload: &Value) -> Result<Decision> {
+    let (event, sub) = parse(harness, payload)?;
     if event == Event::Ignore {
         return Ok(Decision::Allow);
     }
@@ -78,17 +99,31 @@ pub fn handle(harness: &str, input: &str) -> Result<Decision> {
         Some(s) => base.sub(s),
         None => base,
     };
+    let done = |r: Result<()>| r.map(|_| Decision::Allow);
     match event {
         Event::PreEdit(paths) => policy::pre_edit(&store, &agent, &cwd, &paths),
         Event::PreShell(command) => {
             let writes = shell_writes(&command);
-            if !writes.is_empty() {
-                if let Decision::Deny(reason) = policy::pre_edit(&store, &agent, &cwd, &writes)? {
-                    return Ok(Decision::Deny(reason));
-                }
+            let edit = if writes.is_empty() {
+                Decision::Allow
+            } else {
+                policy::pre_edit(&store, &agent, &cwd, &writes)?
+            };
+            if matches!(edit, Decision::Deny(_) | Decision::Stale(_)) {
+                return Ok(edit);
             }
-            policy::pre_shell(&store, &agent, &cwd, &command)
+            match policy::pre_shell(&store, &agent, &cwd, &command)? {
+                Decision::Allow => Ok(edit),
+                refused => Ok(refused),
+            }
         }
+        Event::PostWrite(paths) => done(policy::post_write(&store, &agent, &cwd, &paths)),
+        Event::PostRead(paths) => done(policy::post_read(&store, &agent, &cwd, &paths)),
+        Event::PostShell(command) => done(
+            policy::post_write(&store, &agent, &cwd, &shell_writes(&command))
+                .and_then(|_| policy::post_read(&store, &agent, &cwd, &shell_reads(&command))),
+        ),
+        Event::TurnStart => policy::turn_start(&store, &agent),
         Event::End => policy::end(&store, &agent).map(|_| Decision::Allow),
         Event::Ignore => Ok(Decision::Allow),
     }
@@ -108,18 +143,50 @@ pub fn parse(harness: &str, p: &Value) -> Result<(Event, Option<String>)> {
 
 /// Claude Code and Codex share the hook protocol; Codex sends `apply_patch` with the raw patch text.
 fn claude_or_codex(p: &Value) -> Event {
+    let input = &p["tool_input"];
+    let tool = p["tool_name"].as_str().unwrap_or_default();
+    let patch = || input["command"].as_str().or(input["input"].as_str());
     match p["hook_event_name"].as_str().unwrap_or_default() {
-        "PreToolUse" => {
-            let input = &p["tool_input"];
-            match p["tool_name"].as_str().unwrap_or_default() {
-                "Edit" | "Write" | "MultiEdit" => strings(&[&input["file_path"]]),
-                "NotebookEdit" => strings(&[&input["notebook_path"]]),
-                "apply_patch" => patch_event(input["command"].as_str().or(input["input"].as_str())),
-                "Bash" => shell_event(input["command"].as_str()),
-                _ => Event::Ignore,
-            }
-        }
+        "PreToolUse" => match tool {
+            "Edit" | "Write" | "MultiEdit" => strings(&[&input["file_path"]]),
+            "NotebookEdit" => strings(&[&input["notebook_path"]]),
+            "apply_patch" => patch_event(patch()),
+            "Bash" => shell_event(input["command"].as_str()),
+            _ => Event::Ignore,
+        },
+        "PostToolUse" => match tool {
+            "Edit" | "Write" | "MultiEdit" => post_write(strings(&[&input["file_path"]])),
+            "NotebookEdit" => post_write(strings(&[&input["notebook_path"]])),
+            "Read" => post_read(strings(&[&input["file_path"]])),
+            "apply_patch" => post_write(patch_event(patch())),
+            "Bash" => post_shell(shell_event(input["command"].as_str())),
+            _ => Event::Ignore,
+        },
+        "UserPromptSubmit" => Event::TurnStart,
         "Stop" | "SessionEnd" | "SubagentStop" => Event::End,
+        _ => Event::Ignore,
+    }
+}
+
+/// Turns a pre-write event into the matching post-write one.
+fn post_write(pre: Event) -> Event {
+    match pre {
+        Event::PreEdit(paths) => Event::PostWrite(paths),
+        _ => Event::Ignore,
+    }
+}
+
+fn post_read(pre: Event) -> Event {
+    match pre {
+        Event::PreEdit(paths) => Event::PostRead(paths),
+        _ => Event::Ignore,
+    }
+}
+
+fn post_shell(pre: Event) -> Event {
+    match pre {
+        Event::PreEdit(paths) => Event::PostWrite(paths),
+        Event::PreShell(command) => Event::PostShell(command),
         _ => Event::Ignore,
     }
 }
@@ -127,13 +194,19 @@ fn claude_or_codex(p: &Value) -> Event {
 /// Payload built by integrations/opencode/six-ten.ts: `{event, tool, sessionID, args, directory}`.
 fn opencode(p: &Value) -> (Event, Option<String>) {
     let args = &p["args"];
+    let tool = p["tool"].as_str().unwrap_or_default();
+    let pre = || match tool {
+        "edit" | "write" => strings(&[&args["filePath"]]),
+        "apply_patch" => patch_event(args["patchText"].as_str()),
+        "bash" => shell_event(args["command"].as_str()),
+        _ => Event::Ignore,
+    };
     let event = match p["event"].as_str().unwrap_or_default() {
-        "tool.execute.before" => match p["tool"].as_str().unwrap_or_default() {
-            "edit" | "write" => strings(&[&args["filePath"]]),
-            "apply_patch" => patch_event(args["patchText"].as_str()),
-            "bash" => shell_event(args["command"].as_str()),
-            _ => Event::Ignore,
-        },
+        "tool.execute.before" => pre(),
+        "tool.execute.after" if tool == "read" => post_read(strings(&[&args["filePath"]])),
+        "tool.execute.after" if tool == "bash" => post_shell(pre()),
+        "tool.execute.after" => post_write(pre()),
+        "chat.message" => Event::TurnStart,
         "session.idle" | "session.deleted" => Event::End,
         _ => Event::Ignore,
     };
@@ -143,16 +216,20 @@ fn opencode(p: &Value) -> (Event, Option<String>) {
 /// Hermes shell-hook payload: `{hook_event_name, tool_name, tool_input, session_id, cwd}`.
 fn hermes(p: &Value) -> (Event, Option<String>) {
     let input = &p["tool_input"];
+    let tool = p["tool_name"].as_str().unwrap_or_default();
+    let pre = || match tool {
+        "write_file" => strings(&[&input["path"]]),
+        "patch" if input["mode"].as_str() == Some("patch") => patch_event(input["patch"].as_str()),
+        "patch" => strings(&[&input["path"]]),
+        "terminal" => shell_event(input["command"].as_str()),
+        _ => Event::Ignore,
+    };
     let event = match p["hook_event_name"].as_str().unwrap_or_default() {
-        "pre_tool_call" => match p["tool_name"].as_str().unwrap_or_default() {
-            "write_file" => strings(&[&input["path"]]),
-            "patch" if input["mode"].as_str() == Some("patch") => {
-                patch_event(input["patch"].as_str())
-            }
-            "patch" => strings(&[&input["path"]]),
-            "terminal" => shell_event(input["command"].as_str()),
-            _ => Event::Ignore,
-        },
+        "pre_tool_call" => pre(),
+        "post_tool_call" if tool == "read_file" => post_read(strings(&[&input["path"]])),
+        "post_tool_call" if tool == "terminal" => post_shell(pre()),
+        "post_tool_call" => post_write(pre()),
+        "pre_llm_call" => Event::TurnStart,
         "on_session_end" | "on_session_finalize" => Event::End,
         _ => Event::Ignore,
     };
@@ -303,6 +380,44 @@ fn strings(values: &[&Value]) -> Event {
     }
 }
 
+/// Best-effort list of files a shell command reads (`cat`, `sed -n`, `head`, `rg pattern file`, ...).
+/// Non-file tokens are dropped later, when paths are checked against the working tree.
+pub fn shell_reads(command: &str) -> Vec<String> {
+    const READERS: &[&str] = &[
+        "cat", "head", "tail", "less", "more", "bat", "nl", "sed", "grep", "rg", "awk", "wc",
+        "diff",
+    ];
+    let mut out = Vec::new();
+    let separated = crate::git::skeleton(command)
+        .replace("&&", ";")
+        .replace("||", ";");
+    for segment in separated.split([';', '|', '\n', '(', ')']) {
+        let words: Vec<&str> = segment
+            .split_whitespace()
+            .take_while(|t| !t.starts_with('>') && !t.starts_with('<'))
+            .map(|t| t.trim_matches(|c| c == '"' || c == '\''))
+            .collect();
+        let Some(cmd) = words.first().map(|c| c.rsplit('/').next().unwrap_or(c)) else {
+            continue;
+        };
+        let in_place = words
+            .iter()
+            .any(|w| w.starts_with("-i") || *w == "--in-place");
+        if READERS.contains(&cmd) && !in_place {
+            out.extend(
+                words[1..]
+                    .iter()
+                    .filter(|w| !w.is_empty() && !w.starts_with('-'))
+                    .map(|w| w.to_string()),
+            );
+        }
+    }
+    out.retain(|p| !p.contains(['$', '*', '`', '{']));
+    out.sort();
+    out.dedup();
+    out
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -339,6 +454,20 @@ mod tests {
         );
         assert!(shell_writes("git commit -m 'fix -> thing' && ls -la").is_empty());
         assert!(shell_writes("grep -r foo src").is_empty());
+    }
+
+    #[test]
+    fn finds_shell_reads() {
+        assert_eq!(
+            shell_reads("sed -n '1,80p' src/a.rs && cat b.rs | head -n 5"),
+            vec!["5", "b.rs", "src/a.rs"]
+        );
+        assert_eq!(
+            shell_reads("rg -n foo src/lib.rs"),
+            vec!["foo", "src/lib.rs"]
+        );
+        assert!(shell_reads("sed -i 's/a/b/' x.rs").is_empty());
+        assert!(shell_reads("cargo test").is_empty());
     }
 
     #[test]
