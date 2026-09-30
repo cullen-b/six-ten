@@ -373,6 +373,13 @@ fn hermes(scope: &Scope) -> Result<()> {
                 .map(|h| Path::new(&h).join(".hermes"))
         })
         .context("cannot locate the Hermes home (set HERMES_HOME)")?;
+    if let Scope::Global(_) = scope {
+        // Hermes's own global instructions, if the user keeps them.
+        let agents = home.join("AGENTS.md");
+        if agents.exists() {
+            protocol_block(&agents)?;
+        }
+    }
     let dir = home.join("plugins/six-ten");
     fs::create_dir_all(&dir)?;
     fs::write(
