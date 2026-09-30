@@ -2,6 +2,13 @@
 name = "six-ten"
 version = "0.1.0"
 edition = "2024"
+rust-version = "1.85"
+description = "Coordinates file edits between coding agents (Claude Code, Codex, OpenCode, Hermes, ...) sharing one git checkout"
+license = "MIT OR Apache-2.0"
+repository = "https://github.com/cullen-b/six-ten"
+readme = "README.md"
+keywords = ["agents", "claude-code", "codex", "mcp", "git"]
+categories = ["command-line-utilities", "development-tools"]
 
 [dependencies]
 anyhow = "1.0.104"
