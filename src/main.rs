@@ -61,7 +61,7 @@ enum Command {
     Precommit,
     /// Wire six-ten into a harness for the repository at --repo (default: current directory).
     Install {
-        /// claude, codex, opencode, hermes, git, or all
+        /// claude, codex, opencode, hermes, generic (any other harness), git, or all
         harness: String,
         #[arg(long)]
         repo: Option<PathBuf>,

@@ -9,10 +9,21 @@ use crate::agent::Agent;
 use crate::policy::{self, Decision};
 use crate::store::Store;
 
-const INSTRUCTIONS: &str = "six-ten coordinates file edits between several agents sharing this checkout. \
-Before editing a file, claim it with six_ten_claim (edits may also be claimed automatically by hooks). If a file is \
-held by another agent, work on other files and come back later, or call six_ten_wait to block until it is free. \
-Never stash, reset, restore, clean, switch branches or pull while other agents are active.";
+const HOOKED: &str = "six-ten coordinates edits between agents sharing this checkout. Your edits are claimed \
+automatically, so do not call six-ten tools before ordinary edits. If an edit is refused because another agent holds \
+the file, work on other files and retry later; call six_ten_wait only when nothing else is left to do. Notes from \
+six-ten are diffs of other agents' changes: account for them, and re-read a file only when told to. Never stash, reset, \
+restore, clean, switch branches or pull while other agents are active.";
+
+const UNHOOKED: &str = "six-ten coordinates edits between agents sharing this checkout. Your harness has no six-ten \
+hooks, so claim files with six_ten_claim right before you edit them, and release them with six_ten_release when you \
+are done. If a file is held by another agent, work on other files and retry later; call six_ten_wait only when \
+nothing else is left to do. Never stash, reset, restore, clean, switch branches or pull while other agents are active.";
+
+/// Harnesses whose hooks already claim edits get fewer tools, so agents don't spend calls on claims.
+fn hooked(cwd: &Path, agent: &Agent) -> bool {
+    Store::open(cwd).is_ok_and(|s| s.is_hooked(crate::store::harness_of(&agent.id)))
+}
 
 /// Serves MCP over stdio (newline-delimited JSON-RPC) until stdin closes.
 pub fn serve() -> Result<()> {
@@ -50,10 +61,10 @@ fn respond(cwd: &Path, agent: &Agent, msg: &Value) -> Result<Value, (i64, String
             "protocolVersion": params["protocolVersion"].as_str().unwrap_or("2025-06-18"),
             "capabilities": {"tools": {}},
             "serverInfo": {"name": "six-ten", "version": env!("CARGO_PKG_VERSION")},
-            "instructions": INSTRUCTIONS,
+            "instructions": if hooked(cwd, agent) { HOOKED } else { UNHOOKED },
         })),
         "ping" => Ok(json!({})),
-        "tools/list" => Ok(json!({"tools": tools()})),
+        "tools/list" => Ok(json!({"tools": tools(hooked(cwd, agent))})),
         "tools/call" => {
             let args = &params["arguments"];
             let result = call(
@@ -126,28 +137,31 @@ fn reply(decision: Decision, ok: String) -> (String, bool) {
     }
 }
 
-fn tools() -> Value {
+fn tools(hooked: bool) -> Value {
     let paths = json!({"type": "array", "items": {"type": "string"}, "description": "File paths (absolute or relative to the repo)"});
-    json!([
-        {
-            "name": "six_ten_claim",
-            "description": "Claim files before editing them. Fails, naming the holder, if another agent is editing any of them; then work on other files or use six_ten_wait.",
-            "inputSchema": {"type": "object", "properties": {"paths": paths}, "required": ["paths"]},
-        },
-        {
+    let mut tools = vec![
+        json!({
             "name": "six_ten_wait",
-            "description": "Block until the given files are free, then claim them. Use only when you cannot make progress on other files.",
+            "description": "Block until the given files are free, then claim them. Only for files you were refused and when nothing else is left to do.",
             "inputSchema": {"type": "object", "properties": {"paths": paths, "timeout_seconds": {"type": "integer", "description": "Max wait, default 300"}}, "required": ["paths"]},
-        },
-        {
+        }),
+        json!({
             "name": "six_ten_release",
-            "description": "Release your claims (all of them if paths is omitted) so other agents can edit those files.",
+            "description": "Release your claims early (all of them if paths is omitted). They are released automatically when your turn ends.",
             "inputSchema": {"type": "object", "properties": {"paths": paths}},
-        },
-        {
+        }),
+        json!({
             "name": "six_ten_status",
-            "description": "Show which files each agent is editing or has left uncommitted.",
+            "description": "Who is editing what. Useful for choosing what to work on; never needed before an edit.",
             "inputSchema": {"type": "object", "properties": {}},
-        },
-    ])
+        }),
+    ];
+    if !hooked {
+        tools.insert(0, json!({
+            "name": "six_ten_claim",
+            "description": "Claim files right before editing them. Fails, naming the holder, if another agent is editing any of them; then work on other files.",
+            "inputSchema": {"type": "object", "properties": {"paths": paths}, "required": ["paths"]},
+        }));
+    }
+    Value::Array(tools)
 }

@@ -78,6 +78,20 @@ impl Store {
         Ok(Store { root, dir })
     }
 
+    /// Remembers that `harness` runs six-ten hooks in this repo, so its MCP server can skip claims.
+    pub fn mark_hooked(&self, harness: &str) -> Result<()> {
+        let marker = self.dir.join("hooked").join(harness);
+        if !marker.exists() {
+            fs::create_dir_all(self.dir.join("hooked"))?;
+            fs::write(marker, "")?;
+        }
+        Ok(())
+    }
+
+    pub fn is_hooked(&self, harness: &str) -> bool {
+        self.dir.join("hooked").join(harness).exists()
+    }
+
     pub fn root(&self) -> &Path {
         &self.root
     }
@@ -298,6 +312,11 @@ impl Store {
         FileExt::unlock(&mutex)?;
         result
     }
+}
+
+/// Harness behind an agent id: `codex:123/sub` → `codex`.
+pub fn harness_of(agent_id: &str) -> &str {
+    agent_id.split([':', '/']).next().unwrap_or(agent_id)
 }
 
 /// Whether `a` and `b` are different agents, not the same agent or a parent and its subagent.

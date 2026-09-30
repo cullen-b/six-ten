@@ -95,6 +95,7 @@ pub fn handle(harness: &str, payload: &Value) -> Result<Decision> {
         return Ok(Decision::Allow);
     };
     let base = Agent::current();
+    store.mark_hooked(crate::store::harness_of(&base.id))?;
     let agent = match &sub {
         Some(s) => base.sub(s),
         None => base,
@@ -357,25 +358,26 @@ pub fn shell_writes(command: &str) -> Vec<String> {
     out
 }
 
-/// `{"event": "pre_edit"|"pre_shell"|"end", "cwd", "paths": [..], "command", "sub"}`, for small
-/// harness shims that do their own payload mapping.
+/// The contract for harnesses without a dedicated adapter (see README, "Adding a harness"):
+/// `{"event", "cwd", "paths": [..], "command", "sub"}` where event is one of `pre_edit`,
+/// `pre_shell`, `post_write`, `post_read`, `post_shell`, `turn_start` or `end`.
 fn generic(p: &Value) -> (Event, Option<String>) {
-    let sub = text(&p["sub"]);
+    let paths: Vec<&Value> = p["paths"]
+        .as_array()
+        .map(|a| a.iter().collect())
+        .unwrap_or_default();
+    let command = p["command"].as_str();
     let event = match p["event"].as_str().unwrap_or_default() {
-        "pre_edit" => {
-            let paths: Vec<&Value> = p["paths"]
-                .as_array()
-                .map(|a| a.iter().collect())
-                .unwrap_or_default();
-            strings(&paths)
-        }
-        "pre_shell" => p["command"]
-            .as_str()
-            .map_or(Event::Ignore, |c| Event::PreShell(c.into())),
+        "pre_edit" => strings(&paths),
+        "pre_shell" => shell_event(command),
+        "post_write" => post_write(strings(&paths)),
+        "post_read" => post_read(strings(&paths)),
+        "post_shell" => post_shell(shell_event(command)),
+        "turn_start" => Event::TurnStart,
         "end" => Event::End,
         _ => Event::Ignore,
     };
-    (event, sub)
+    (event, text(&p["sub"]))
 }
 
 fn strings(values: &[&Value]) -> Event {

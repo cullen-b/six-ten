@@ -27,6 +27,46 @@ six-ten install all             # or: claude | codex | opencode | hermes | git
 
 Commit the generated files so every agent (and teammate) gets them.
 
+## Adding a harness
+
+Any harness can use six-ten, at one of two levels. Start with `six-ten install generic`, which adds the
+`AGENTS.md` section and the git pre-commit backstop.
+
+1. **MCP only (advisory).** Register `six-ten mcp` as a stdio MCP server. The agent gets
+   `six_ten_claim`/`wait`/`release`/`status` and is told to claim files before editing. This works
+   as long as the agent follows the instructions.
+2. **Hooks (enforced).** If the harness can run a command before and after tool calls, forward
+   them to `six-ten hook generic` as JSON on stdin:
+
+   | `event` | when | extra fields |
+   |---|---|---|
+   | `pre_edit` | before a tool writes files | `paths` |
+   | `pre_shell` | before a shell command | `command` |
+   | `post_write` / `post_read` | after a tool wrote / read files | `paths` |
+   | `post_shell` | after a shell command | `command` |
+   | `turn_start` | a new user message | |
+   | `end` | end of the agent's turn or session | |
+
+   Every payload carries `cwd`, plus `sub` to tell a harness's subagents or sessions apart. Reply
+   handling: **exit 2** means refuse the tool call and show stderr to the model. **stdout
+   `{"note": "..."}`** means allow, and add the note to the model's context (append it to the tool
+   result, or to the next message). Anything else means allow. `pre_edit` and `end` are the minimum;
+   the rest enable change notes. Run `six-ten` as a direct child of the harness process, because
+   that's how agents are identified. Once hooks run, the harness's MCP server stops offering
+   `six_ten_claim`, since edits are already claimed.
+
+   ```python
+   def six_ten(event, **fields):
+       p = subprocess.run(["six-ten", "hook", "generic"], capture_output=True, text=True,
+                          input=json.dumps({"event": event, "cwd": os.getcwd(), **fields}))
+       if p.returncode == 2:
+           raise ToolRefused(p.stderr)                    # show to the model; skip the call
+       return json.loads(p.stdout or "{}").get("note")    # add to the model's context if set
+   ```
+
+   `integrations/opencode/six-ten.ts` and `integrations/hermes/six-ten/` are complete examples.
+   Use `six-ten watch` to check that blocks and releases show up.
+
 ## How it works
 
 - **Leases.** A `PreToolUse`-style hook claims a file before each edit. Leases live as one JSON file

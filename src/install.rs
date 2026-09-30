@@ -13,16 +13,16 @@ const GIT_RULES: &str = "[permissions.six-ten.filesystem.\":workspace_roots\"]\n
 
 const PROTOCOL: &str = "## Working alongside other agents (six-ten)
 
-Several agents may be editing this checkout at the same time. six-ten keeps you from colliding:
+Several agents may be editing this checkout at the same time; six-ten keeps you from colliding.
 
-- Edits are claimed automatically. If an edit is blocked because another agent holds the file, work on
-  other files first and retry later, or call `six_ten_wait` (CLI: `six-ten wait <path>`) to block
-  until it is free. Never work around a block with shell redirection, `sed -i`, or similar.
-- If you edit files through the shell, claim them first: `six-ten claim <paths>` (MCP: `six_ten_claim`).
-- Never run `git stash`, `git reset --hard`, `git checkout`/`git switch`, `git restore`, `git clean` or
-  `git pull` while other agents are active; they rewrite everyone's files.
-- Commit only files you changed: `git add <your files>`, never `git add -A`/`git commit -a`.
-- `six-ten status` (MCP: `six_ten_status`) shows who is editing what.";
+- Just edit. With six-ten hooks installed your edits are claimed automatically: don't call
+  `six_ten_claim` or `six_ten_status` before ordinary edits. (Only if `six_ten_claim` is in your
+  tool list does your harness lack hooks; then claim files right before editing them.)
+- If an edit is refused because another agent holds the file, work on other files and retry later.
+  Call `six_ten_wait` only when nothing else is left. Never get around a refusal with the shell.
+- Notes from six-ten are diffs of other agents' changes: account for them; re-read only when told to.
+- Never run `git stash`, `reset --hard`, `checkout`/`switch`, `restore`, `clean` or `pull` while
+  other agents are active. Commit only your files: `git add <paths>`, never `git add -A`/`commit -a`.";
 
 pub fn run(harness: &str, repo: &Path) -> Result<()> {
     let root = git_out(repo, &["rev-parse", "--show-toplevel"])
@@ -34,6 +34,14 @@ pub fn run(harness: &str, repo: &Path) -> Result<()> {
         "opencode" => opencode(root)?,
         "hermes" => hermes(root)?,
         "git" => git_hook(root)?,
+        "generic" => {
+            protocol_block(&root.join("AGENTS.md"))?;
+            git_hook(root)?;
+            println!(
+                "generic: protocol in AGENTS.md. Register `{BIN} mcp` as a stdio MCP server in your harness.\n  \
+                 For enforcement, forward its tool hooks to `{BIN} hook generic` (README: \"Adding a harness\")."
+            );
+        }
         "all" => {
             claude(root)?;
             codex(root)?;
@@ -42,8 +50,18 @@ pub fn run(harness: &str, repo: &Path) -> Result<()> {
             git_hook(root)?;
         }
         other => bail!(
-            "unknown harness `{other}` (expected claude, codex, opencode, hermes, git or all)"
+            "unknown harness `{other}` (expected claude, codex, opencode, hermes, generic, git or all)"
         ),
+    }
+    // The MCP server hides six_ten_claim from harnesses whose hooks already claim edits.
+    let hooked: Vec<&str> = match harness {
+        "all" => vec!["claude", "codex", "opencode", "hermes"],
+        "git" | "generic" => vec![],
+        one => vec![one],
+    };
+    let store = crate::store::Store::open(root)?;
+    for h in hooked {
+        store.mark_hooked(h)?;
     }
     if Command::new(BIN).arg("--version").output().is_err() {
         eprintln!(

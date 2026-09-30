@@ -977,3 +977,123 @@ fn an_agent_may_commit_and_stash_its_own_subagents_work() {
     assert!(forced.status.success());
     assert_eq!(events(&dir).last().unwrap()["kind"], "override");
 }
+
+fn mcp_session(dir: &Path, agent: &str) -> Vec<Value> {
+    let mut child = Command::new(BIN)
+        .current_dir(dir)
+        .env("SIX_TEN_AGENT", agent)
+        .arg("mcp")
+        .stdin(Stdio::piped())
+        .stdout(Stdio::piped())
+        .spawn()
+        .unwrap();
+    let mut stdin = child.stdin.take().unwrap();
+    writeln!(
+        stdin,
+        "{}",
+        json!({"jsonrpc": "2.0", "id": 1, "method": "initialize", "params": {}})
+    )
+    .unwrap();
+    writeln!(
+        stdin,
+        "{}",
+        json!({"jsonrpc": "2.0", "id": 2, "method": "tools/list"})
+    )
+    .unwrap();
+    drop(stdin);
+    let out = child.wait_with_output().unwrap();
+    String::from_utf8(out.stdout)
+        .unwrap()
+        .lines()
+        .map(|l| serde_json::from_str(l).unwrap())
+        .collect()
+}
+
+#[test]
+fn mcp_drops_claim_for_harnesses_whose_hooks_claim_edits() {
+    let dir = repo();
+    let names = |r: &Value| -> Vec<String> {
+        r["result"]["tools"]
+            .as_array()
+            .unwrap()
+            .iter()
+            .map(|t| t["name"].as_str().unwrap().to_string())
+            .collect()
+    };
+    let before = mcp_session(&dir, "cursor:1");
+    assert!(names(&before[1]).contains(&"six_ten_claim".to_string()));
+    assert!(
+        before[0]["result"]["instructions"]
+            .as_str()
+            .unwrap()
+            .contains("claim files with six_ten_claim")
+    );
+    // The first hook run from this harness marks it as hooked.
+    hook(
+        &dir,
+        "cursor:1",
+        "generic",
+        json!({"event": "pre_edit", "cwd": dir, "paths": ["src/a.rs"]}),
+    );
+    let after = mcp_session(&dir, "cursor:2");
+    assert_eq!(
+        names(&after[1]),
+        ["six_ten_wait", "six_ten_release", "six_ten_status"]
+    );
+    assert!(
+        after[0]["result"]["instructions"]
+            .as_str()
+            .unwrap()
+            .contains("claimed automatically")
+    );
+}
+
+#[test]
+fn generic_contract_covers_the_full_lifecycle() {
+    let dir = repo();
+    let g = |agent: &str, v: Value| hook(&dir, agent, "generic", v);
+    g("new", json!({"event": "turn_start", "cwd": dir}));
+    g(
+        "new",
+        json!({"event": "post_read", "cwd": dir, "paths": ["src/a.rs"]}),
+    );
+    assert_eq!(
+        g(
+            "bob",
+            json!({"event": "pre_edit", "cwd": dir, "paths": ["src/a.rs"]})
+        )
+        .status
+        .code(),
+        Some(0)
+    );
+    assert_eq!(
+        g(
+            "new",
+            json!({"event": "pre_edit", "cwd": dir, "paths": ["src/a.rs"]})
+        )
+        .status
+        .code(),
+        Some(2)
+    );
+    fs::write(dir.join("src/a.rs"), "a\nbob\n").unwrap();
+    g(
+        "bob",
+        json!({"event": "post_write", "cwd": dir, "paths": ["src/a.rs"]}),
+    );
+    g("bob", json!({"event": "end", "cwd": dir}));
+    let note = g(
+        "new",
+        json!({"event": "post_shell", "cwd": dir, "command": "ls"}),
+    );
+    let v: Value = serde_json::from_slice(&note.stdout).unwrap();
+    assert!(v["note"].as_str().unwrap().contains("+bob"));
+    assert_eq!(
+        g(
+            "new",
+            json!({"event": "pre_shell", "cwd": dir, "command": "echo x > src/a.rs"})
+        )
+        .status
+        .code(),
+        Some(0)
+    );
+}
