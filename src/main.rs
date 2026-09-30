@@ -63,8 +63,11 @@ enum Command {
     Install {
         /// claude, codex, opencode, hermes, generic (any other harness), git, or all
         harness: String,
-        #[arg(long)]
+        #[arg(long, conflicts_with = "global")]
         repo: Option<PathBuf>,
+        /// Install into the user-level config, for every repository on this machine.
+        #[arg(long)]
+        global: bool,
     },
 }
 
@@ -94,9 +97,11 @@ fn run(command: Command) -> Result<u8> {
     match command {
         Command::Hook { harness } => Ok(hook::run(&harness) as u8),
         Command::Mcp => mcp::serve().map(|_| 0),
-        Command::Install { harness, repo } => {
-            install::run(&harness, &repo.unwrap_or(cwd)).map(|_| 0)
-        }
+        Command::Install {
+            harness,
+            repo,
+            global,
+        } => install::run(&harness, &repo.unwrap_or(cwd), global).map(|_| 0),
         Command::Whoami => {
             println!("{}", Agent::current().id);
             Ok(0)

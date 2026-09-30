@@ -90,6 +90,7 @@ impl Store {
 
     pub fn is_hooked(&self, harness: &str) -> bool {
         self.dir.join("hooked").join(harness).exists()
+            || global_marker(harness).is_some_and(|m| m.exists())
     }
 
     pub fn root(&self) -> &Path {
@@ -312,6 +313,18 @@ impl Store {
         FileExt::unlock(&mutex)?;
         result
     }
+}
+
+fn global_marker(harness: &str) -> Option<PathBuf> {
+    crate::install::config_home().map(|d| d.join("six-ten/hooked").join(harness))
+}
+
+/// Marks `harness` as hooked in every repository (`install --global`).
+pub fn mark_hooked_globally(harness: &str) -> Result<()> {
+    let marker = global_marker(harness).context("cannot locate ~/.config")?;
+    fs::create_dir_all(marker.parent().context("marker has no parent")?)?;
+    fs::write(marker, "")?;
+    Ok(())
 }
 
 /// Harness behind an agent id: `codex:123/sub` → `codex`.

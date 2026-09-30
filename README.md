@@ -61,6 +61,14 @@ six-ten install all      # or pick harnesses: claude | codex | opencode | hermes
 git add -A && git commit -m "Add six-ten"
 ```
 
+Or install once for every repo on your machine. This writes each harness's user-level config
+(`~/.claude`, `~/.codex`, `~/.config/opencode`, `~/.hermes`) and keeps your existing hooks and
+settings:
+
+```sh
+six-ten install all --global      # then, per repo, optionally: six-ten install git
+```
+
 Then start your agents as usual. There's nothing to run in the background.
 
 ```sh
@@ -197,7 +205,7 @@ and [`integrations/hermes/six-ten/`](integrations/hermes/six-ten/__init__.py) (P
 ## Reference
 
 ```
-six-ten install <harness>        claude | codex | opencode | hermes | generic | git | all
+six-ten install <harness>        claude | codex | opencode | hermes | generic | git | all  [--global]
 six-ten status                   leases, other agents' uncommitted work, recent events
 six-ten watch [--history N]      live event feed
 six-ten notify [on|off]          desktop notifications for this repo (off by default)
