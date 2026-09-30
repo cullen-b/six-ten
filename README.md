@@ -20,9 +20,9 @@ six-ten install all             # or: claude | codex | opencode | hermes | git
 | harness | what `install` writes | notes |
 |---|---|---|
 | Claude Code | `.claude/settings.json` hooks + permissions, `.mcp.json`, `CLAUDE.md` section | Trust the folder once interactively, or project permissions are ignored |
-| Codex | `.codex/hooks.json`, `.codex/config.toml` MCP, `AGENTS.md` section | Codex loads project config only for trusted projects; approve the hooks once via `/hooks` |
+| Codex | `.codex/hooks.json`, `.codex/config.toml` MCP + a `six-ten` sandbox profile, `AGENTS.md` section | Codex loads project config only for trusted projects; approve the hooks once via `/hooks`. The profile makes `.git` writable so agents can commit, while `.git/hooks` and `.git/config` stay read-only (writing those would run code outside the sandbox) |
 | OpenCode | `.opencode/plugins/six-ten.ts`, `opencode.json` MCP, `AGENTS.md` section | |
-| Hermes | `AGENTS.md` section; prints a snippet for `~/.hermes/config.yaml` | Hermes config is global only |
+| Hermes | plugin in `$HERMES_HOME/plugins/six-ten` (default `~/.hermes`), enabled and MCP-registered via the `hermes` CLI; `AGENTS.md` section | Hermes plugins are global; outside a git repo the plugin does nothing |
 | git | `pre-commit` hook running `six-ten precommit` | Backstop for every harness |
 
 Commit the generated files so every agent (and teammate) gets them.
@@ -43,7 +43,7 @@ Commit the generated files so every agent (and teammate) gets them.
 - **Uncommitted work.** six-ten remembers which live agent edited which dirty file. While another
   agent has uncommitted work, `git stash`, `reset --hard`, `checkout`/`switch`, `restore`, `clean`,
   `pull`, `merge` and `rebase` are blocked if they would touch it, and `six-ten precommit` refuses
-  commits that include it (`SIX_TEN_ALLOW_COMMIT=1` to override).
+  commits that include it (see below for the override).
 - **Stale context.** Every completed write goes into a journal (`journal.jsonl`, contents kept as git
   blobs), and six-ten tracks what each agent last read. When another agent changes a file you have
   read, you are told once, with a compact diff:
@@ -52,8 +52,26 @@ Commit the generated files so every agent (and teammate) gets them.
   - if you are about to write that very file, the write is refused once with the diff (the lease is
     kept), so you re-read before overwriting; the retry goes through;
   - files others changed during your turn that you never read are listed by name.
-  Hermes shell hooks can't annotate a call, so there the next write is refused once with the note.
+  Hermes gets notes through its plugin's `transform_tool_result` hook.
 - **Fail open.** If six-ten itself errors, or the directory isn't a git repo, the edit is allowed.
+
+## Seeing what agents did
+
+```
+six-ten watch          # live feed
+six-ten notify on      # desktop notifications for this repo (off by default)
+```
+
+```
+⏸ codex:97632  blocked on src/shared.rs (held by claude:96994)
+✅ codex:97632  got src/shared.rs after 57s (claude:96994 held it): edited 1 other file meanwhile, waited with six_ten_wait
+🔄 codex:97632  stopped from overwriting src/shared.rs: hermes:97635/… changed it since it was read
+✅ codex:97632  re-read src/shared.rs and retried after hermes:97635/…'s change
+```
+
+The feed also shows refused git commands and commits (⛔), and blocks an agent never got past before its
+turn ended (⚠️). `six-ten status` lists the most recent events. `SIX_TEN_ALLOW_COMMIT=1` overrides the
+commit check for humans; agents are never told about it, and every use is logged.
 
 ## CLI
 
@@ -62,6 +80,7 @@ six-ten claim <paths>          # exit 2 + reason if another agent holds any of t
 six-ten wait <paths> [--timeout 300]
 six-ten release [paths]        # all of yours when no paths are given
 six-ten status                 # who is editing what, and whose uncommitted work is where
+six-ten watch | notify [on|off]
 six-ten whoami | gc | mcp | hook <harness> | precommit | install <harness>
 ```
 
