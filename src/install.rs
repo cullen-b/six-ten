@@ -20,9 +20,9 @@ Several agents may share this checkout; six-ten keeps you from colliding.
 - If an edit is refused because another agent holds the file, work on other files and retry later.
   Call `six_ten_wait` only when nothing else is left. Never get around a refusal with the shell.
 - Notes from six-ten are diffs of other agents' changes: account for them; re-read only when told to.
-- Branches: all agents share the checked-out branch. Never create or switch branches while other
-  agents are active. If you're on `main` and `six-ten status` shows no other agents, start a session
-  branch first: `git switch -c agents/<YYYY-MM-DD>-<topic>`.
+- Branches: all agents share the checked-out branch; never create or switch branches yourself.
+  Before your first commit, run `six-ten session <topic>`: it starts today's session branch, or
+  reuses the one another agent already started.
 - Commit your own finished files as you go: `git add <paths>` and commit, never `git add -A` or
   `commit -a`. If a shared file is refused, commit the rest now and that file after the other
   agent's turn ends. `Agent:` / `Co-edited-by:` trailers are added for you.

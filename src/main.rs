@@ -39,6 +39,8 @@ enum Command {
     },
     /// Release your claims (all of them when no paths are given).
     Release { paths: Vec<String> },
+    /// Put this checkout on a session branch (agents/<date>-<topic>), or report the one in use.
+    Session { topic: Option<String> },
     /// Show who is editing what.
     Status,
     /// Print the agent id six-ten sees for the calling process.
@@ -130,6 +132,10 @@ fn run(command: Command) -> Result<u8> {
                     });
                     let released = store.release(&agent.id, only.as_deref())?;
                     println!("released {} lease(s)", released.len());
+                    Ok(0)
+                }
+                Command::Session { topic } => {
+                    println!("{}", policy::session(&store, &agent, topic.as_deref())?);
                     Ok(0)
                 }
                 Command::Status => {

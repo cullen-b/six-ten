@@ -17,7 +17,7 @@ fn repo() -> PathBuf {
     ));
     let _ = fs::remove_dir_all(&dir);
     fs::create_dir_all(dir.join("src")).unwrap();
-    git(&dir, &["init", "-q", "-b", "main"]);
+    git(&dir, &["init", "-q", "-b", "dev"]);
     fs::write(dir.join("src/a.rs"), "a\n").unwrap();
     fs::write(dir.join("src/b.rs"), "b\n").unwrap();
     git(&dir, &["add", "."]);
@@ -1339,4 +1339,64 @@ fn branch_switches_wait_for_agents_that_have_not_edited_yet() {
     );
     let status = String::from_utf8(six(&dir, "alice", &["status"]).stdout).unwrap();
     assert!(status.contains("other agents active: bob"), "{status}");
+}
+
+#[test]
+fn agents_commit_on_one_session_branch_started_by_whoever_is_first() {
+    let dir = repo();
+    git(&dir, &["switch", "-q", "-c", "main"]);
+    edit_as(&dir, "alice", "src/a.rs", "a\nalice\n");
+    git(&dir, &["add", "src/a.rs"]);
+    let refused = commit(&dir, "alice", "alice: a");
+    assert!(!refused.status.success());
+    assert!(
+        stderr(&refused).contains("six-ten session <topic>"),
+        "{}",
+        stderr(&refused)
+    );
+
+    // Both agents ask for a session at once: one branch, shared.
+    let racers: Vec<_> = ["alice", "bob"]
+        .iter()
+        .map(|a| {
+            Command::new(BIN)
+                .current_dir(&dir)
+                .env("SIX_TEN_AGENT", a)
+                .args(["session", "Auth Flow!"])
+                .output()
+        })
+        .collect();
+    let texts: Vec<String> = racers
+        .into_iter()
+        .map(|o| String::from_utf8(o.unwrap().stdout).unwrap())
+        .collect();
+    assert_eq!(
+        texts.iter().filter(|t| t.starts_with("started")).count(),
+        1,
+        "{texts:?}"
+    );
+    let branch = String::from_utf8(
+        Command::new("git")
+            .current_dir(&dir)
+            .args(["branch", "--show-current"])
+            .output()
+            .unwrap()
+            .stdout,
+    )
+    .unwrap();
+    assert!(
+        branch.trim().starts_with("agents/") && branch.trim().ends_with("-auth-flow"),
+        "{branch}"
+    );
+    assert_eq!(
+        fs::read_to_string(dir.join("src/a.rs")).unwrap(),
+        "a\nalice\n",
+        "work untouched"
+    );
+    assert!(commit(&dir, "alice", "alice: a").status.success());
+    // Humans may still commit on main.
+    git(&dir, &["switch", "-q", "main"]);
+    fs::write(dir.join("src/b.rs"), "human\n").unwrap();
+    git(&dir, &["add", "src/b.rs"]);
+    assert!(commit(&dir, "someone", "human commit").status.success());
 }

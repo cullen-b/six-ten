@@ -2,7 +2,7 @@ use std::collections::HashSet;
 use std::path::Path;
 use std::time::Duration;
 
-use anyhow::Result;
+use anyhow::{Context, Result};
 
 use crate::agent::Agent;
 use crate::git::{self, Clobber};
@@ -246,7 +246,8 @@ pub fn pre_shell(store: &Store, agent: &Agent, cwd: &Path, command: &str) -> Res
     )?;
     Ok(Decision::Deny(format!(
         "six-ten: blocked `{}` because other agents are working in this checkout and it would discard or rewrite \
-         their changes:\n  {}\nDo not stash, reset, restore, clean, switch branches or pull while they are active. \
+         their changes:\n  {}\nDo not stash, reset, restore, clean, switch branches or pull while they are active \
+         (to start a session branch, run `six-ten session <topic>`, which is safe while others work). \
          Operate only on your own files (e.g. `git add <your files>` then `git commit`), or ask the user.",
         labels.join("`, `"),
         files.join("\n  ")
@@ -256,6 +257,27 @@ pub fn pre_shell(store: &Store, agent: &Agent, cwd: &Path, command: &str) -> Res
 /// Rejects a commit that sweeps in files other live agents are editing or have left uncommitted.
 pub fn pre_commit(store: &Store, agent: &Agent) -> Result<Decision> {
     let overridden = std::env::var("SIX_TEN_ALLOW_COMMIT").is_ok_and(|v| v == "1");
+    let is_agent = store.is_hooked(crate::store::harness_of(&agent.id));
+    let branch = git::current_branch(store.root());
+    if !overridden
+        && is_agent
+        && git::session_branches_enabled(store.root())
+        && branch
+            .as_deref()
+            .is_some_and(|b| git::is_default_branch(store.root(), b))
+    {
+        let b = branch.unwrap_or_default();
+        store.log(
+            &agent.id,
+            "refused",
+            format!("commit on {b} refused: agents commit on a session branch"),
+        )?;
+        return Ok(Decision::Deny(format!(
+            "six-ten: agents don't commit on `{b}`. Run `six-ten session <topic>` first: it starts today's session \
+             branch, or reuses the one another agent already started, without touching anyone's files. Then \
+             commit again."
+        )));
+    }
     let staged: HashSet<String> = git::staged(store.root())?.into_iter().collect();
     let mine = store.touched_by(&agent.id)?;
     let mut hits: Vec<String> = store
@@ -301,6 +323,54 @@ pub fn pre_commit(store: &Store, agent: &Agent) -> Result<Decision> {
          and commit the rest of your files now. If they belong in this commit, ask the user.",
         hits.join("\n  ")
     )))
+}
+
+/// Puts this checkout on a session branch: creates `agents/<date>-<topic>` when on the default
+/// branch, or reports the branch already in use. Serialized, so racing agents share one branch.
+pub fn session(store: &Store, agent: &Agent, topic: Option<&str>) -> Result<String> {
+    store.locked(|| {
+        let root = store.root();
+        let current =
+            git::current_branch(root).context("HEAD is detached; check out a branch first")?;
+        if !git::is_default_branch(root, &current) {
+            return Ok(format!(
+                "session branch: {current} (already checked out; commit here)"
+            ));
+        }
+        let date = std::process::Command::new("date").arg("+%F").output()?;
+        let date = String::from_utf8_lossy(&date.stdout).trim().to_string();
+        let slug: String = topic
+            .unwrap_or("work")
+            .to_lowercase()
+            .chars()
+            .map(|c| if c.is_ascii_alphanumeric() { c } else { '-' })
+            .collect::<String>()
+            .split('-')
+            .filter(|s| !s.is_empty())
+            .collect::<Vec<_>>()
+            .join("-");
+        let slug: String = if slug.is_empty() {
+            "work".into()
+        } else {
+            slug.chars().take(40).collect()
+        };
+        let base = format!("agents/{date}-{slug}");
+        let mut name = base.clone();
+        let mut n = 2;
+        while git::branch_exists(root, &name) {
+            name = format!("{base}-{n}");
+            n += 1;
+        }
+        git::create_branch(root, &name)?;
+        store.log(
+            &agent.id,
+            "session",
+            format!("started session branch {name}"),
+        )?;
+        Ok(format!(
+            "started session branch {name}; every agent in this checkout now commits here"
+        ))
+    })
 }
 
 /// Trailers for a commit by `agent`: who made it, and who else edited its files.

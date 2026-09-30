@@ -129,11 +129,13 @@ profile.
 A checkout can only have one branch checked out, so agents sharing one can't each have a feature
 branch. six-ten changes the workflow to fit:
 
-- **Branch per session, not per feature.** Before the agents start, create a session branch such as
-  `agents/2026-09-29-auth`. An agent can create it too, if it's on `main` and nobody else is active.
-  Every agent commits there. six-ten refuses branch creation and switches while any other agent has
-  been active in the last 30 minutes, even one that hasn't edited anything yet, so nobody pulls the
-  floor out from under anyone. `six-ten status` lists the active agents.
+- **Branch per session, not per feature.** `six-ten session <topic>` puts the checkout on
+  `agents/<date>-<topic>`. It's safe while others work: a new branch at the same commit doesn't touch
+  anyone's files. If a session branch is already checked out, it reuses it, so every agent ends up on
+  the same one. Agents' commits on `main`/`master` are refused with a pointer to that command; your
+  own commits aren't affected. Any other branch creation or switch is refused while another agent has
+  been active in the last 30 minutes. Opt out per repo with
+  `git config six-ten.sessionBranches false`.
 - **Commit early, per agent.** Each agent commits its own finished files as it goes. A commit that
   includes another agent's files is refused. A file two agents both edited waits until the other
   agent's turn ends, then commits with a `Co-edited-by:` trailer. Every agent commit gets an `Agent:`
@@ -282,7 +284,8 @@ and [`integrations/hermes/six-ten/`](integrations/hermes/six-ten/__init__.py) (P
 
 ```
 six-ten install <harness>        claude | codex | opencode | hermes | generic | git | all  [--global]
-six-ten status                   leases, other agents' uncommitted work, recent events
+six-ten status                   active agents, leases, other agents' uncommitted work, recent events
+six-ten session [topic]          start (or reuse) this checkout's agents/<date>-<topic> branch
 six-ten watch [--history N]      live event feed
 six-ten notify [on|off]          desktop notifications for this repo (off by default)
 six-ten claim <paths>            claim manually; exit 2 with the reason if another agent holds any of them
