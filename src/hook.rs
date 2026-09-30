@@ -141,10 +141,13 @@ pub fn parse(harness: &str, p: &Value) -> Result<(Event, Option<String>)> {
     Ok(match harness {
         "claude" | "codex" => (claude_or_codex(p), text(&p["agent_id"])),
         "opencode" => opencode(p),
-        "hermes" => hermes(p),
+        // The plugin speaks exit codes and `{"note"}` like the other shims; shell hooks need Hermes JSON.
+        "hermes" | "hermes-plugin" => hermes(p),
         "generic" => generic(p),
         other => {
-            bail!("unknown harness `{other}` (expected claude, codex, opencode, hermes or generic)")
+            bail!(
+                "unknown harness `{other}` (expected claude, codex, opencode, hermes, hermes-plugin or generic)"
+            )
         }
     })
 }

@@ -407,9 +407,28 @@ fn mcp_server_speaks_json_rpc() {
 fn install_is_idempotent() {
     let dir = repo();
     fs::write(dir.join("CLAUDE.md"), "# Project\n\nExisting notes.\n").unwrap();
+    // Keep the real Hermes install out of this: temp home, and no `hermes` on PATH.
+    let hermes_home = dir.join(".hermes-test");
     for _ in 0..2 {
-        assert!(six(&dir, "x", &["install", "all"]).status.success());
+        let out = Command::new(BIN)
+            .current_dir(&dir)
+            .env("HERMES_HOME", &hermes_home)
+            .env("PATH", "/usr/bin:/bin")
+            .args(["install", "all"])
+            .output()
+            .unwrap();
+        assert!(out.status.success(), "{}", stderr(&out));
     }
+    assert!(hermes_home.join("plugins/six-ten/__init__.py").exists());
+    let codex_config = fs::read_to_string(dir.join(".codex/config.toml")).unwrap();
+    assert!(
+        codex_config.starts_with("default_permissions = \"six-ten\"\n"),
+        "{codex_config}"
+    );
+    assert_eq!(
+        codex_config.matches("\".git/hooks/**\" = \"read\"").count(),
+        1
+    );
     let settings: Value =
         serde_json::from_str(&fs::read_to_string(dir.join(".claude/settings.json")).unwrap())
             .unwrap();
@@ -783,7 +802,49 @@ fn rewrite_after_external_revert_is_still_news() {
     let dir = repo();
     edit_as(&dir, "bob", "src/a.rs", "a\nnew\n");
     git(&dir, &["checkout", "-q", "--", "src/a.rs"]);
-    hook(&dir, "alice", "claude", tool(&dir, "PostToolUse", "Read", "src/a.rs"));
+    hook(
+        &dir,
+        "alice",
+        "claude",
+        tool(&dir, "PostToolUse", "Read", "src/a.rs"),
+    );
     edit_as(&dir, "bob", "src/a.rs", "a\nnew\n");
-    assert!(context(&hook(&dir, "alice", "claude", tool(&dir, "PreToolUse", "Write", "src/z.rs"))).contains("+new"));
+    assert!(
+        context(&hook(
+            &dir,
+            "alice",
+            "claude",
+            tool(&dir, "PreToolUse", "Write", "src/z.rs")
+        ))
+        .contains("+new")
+    );
+}
+
+#[test]
+fn hermes_plugin_mode_blocks_by_exit_code_and_returns_notes() {
+    let dir = repo();
+    six(&dir, "alice", &["claim", "src/a.rs"]);
+    let write = |path: &str| json!({"hook_event_name": "pre_tool_call", "tool_name": "write_file", "cwd": dir, "session_id": "h", "tool_input": {"path": path}});
+    let blocked = hook(&dir, "hm", "hermes-plugin", write("src/a.rs"));
+    assert_eq!(blocked.status.code(), Some(2));
+    assert!(stderr(&blocked).contains("being edited by alice"));
+    six(&dir, "alice", &["release"]);
+    hook(
+        &dir,
+        "hm",
+        "hermes-plugin",
+        json!({"hook_event_name": "post_tool_call", "tool_name": "read_file", "cwd": dir, "session_id": "h", "tool_input": {"path": "src/b.rs"}}),
+    );
+    edit_as(&dir, "bob", "src/b.rs", "b\nbob\n");
+    let after = hook(
+        &dir,
+        "hm",
+        "hermes-plugin",
+        json!({"hook_event_name": "post_tool_call", "tool_name": "terminal", "cwd": dir, "session_id": "h", "tool_input": {"command": "ls"}}),
+    );
+    let v: Value = serde_json::from_slice(&after.stdout).unwrap();
+    assert!(
+        v["note"].as_str().unwrap().contains("+bob"),
+        "post-tool news is delivered, not blocked"
+    );
 }

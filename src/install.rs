@@ -1,5 +1,5 @@
 use std::fs;
-use std::path::Path;
+use std::path::{Path, PathBuf};
 use std::process::Command;
 
 use anyhow::{Context, Result, bail};
@@ -8,6 +8,8 @@ use serde_json::{Value, json};
 const BIN: &str = "six-ten";
 const BEGIN: &str = "<!-- six-ten:begin -->";
 const END: &str = "<!-- six-ten:end -->";
+
+const GIT_RULES: &str = "[permissions.six-ten.filesystem.\":workspace_roots\"]\n\".git/**\" = \"write\"\n\".git/config\" = \"read\"\n\".git/hooks/**\" = \"read\"\n";
 
 const PROTOCOL: &str = "## Working alongside other agents (six-ten)
 
@@ -131,24 +133,41 @@ fn codex(root: &Path) -> Result<()> {
     write_json(&hooks_file, &doc)?;
 
     let config = root.join(".codex/config.toml");
-    let existing = fs::read_to_string(&config).unwrap_or_default();
-    if !existing.contains("[mcp_servers.six-ten]") {
-        let sep = if existing.is_empty() || existing.ends_with('\n') {
-            ""
-        } else {
-            "\n"
-        };
-        fs::write(
-            &config,
-            format!(
-                "{existing}{sep}\n[mcp_servers.six-ten]\ncommand = \"{BIN}\"\nargs = [\"mcp\"]\n"
-            ),
-        )?;
+    let mut text = fs::read_to_string(&config).unwrap_or_default();
+    if !text.is_empty() && !text.ends_with('\n') {
+        text.push('\n');
     }
+    if !text.contains("[mcp_servers.six-ten]") {
+        text.push_str(&format!(
+            "\n[mcp_servers.six-ten]\ncommand = \"{BIN}\"\nargs = [\"mcp\"]\n"
+        ));
+    }
+    // Codex's sandbox keeps .git read-only, so agents can't commit. This profile opens .git but
+    // keeps hooks and config read-only: writing either would run code outside the sandbox.
+    if !text.contains("[permissions.six-ten]") {
+        text.push_str(&format!(
+            "\n[permissions.six-ten]\nextends = \":workspace\"\n\n{GIT_RULES}"
+        ));
+    }
+    let own_profile = text
+        .lines()
+        .any(|l| l.trim_start().starts_with("default_permissions") && !l.contains("\"six-ten\""));
+    if own_profile {
+        println!(
+            "codex: you already set default_permissions; to let agents commit, add to that profile:\n{}",
+            GIT_RULES.replacen("six-ten", "<your profile>", 1)
+        );
+    } else if !text.contains("default_permissions = \"six-ten\"") {
+        // Top-level keys must come before the first table header.
+        text = format!("default_permissions = \"six-ten\"\n{text}");
+    }
+    fs::create_dir_all(config.parent().context("config path has no parent")?)?;
+    fs::write(&config, text)?;
     protocol_block(&root.join("AGENTS.md"))?;
     println!(
         "codex: hooks in .codex/hooks.json, MCP server in .codex/config.toml, protocol in AGENTS.md\n  \
-         Codex loads project config only for trusted projects, and asks you to approve new hooks: run /hooks once."
+         Codex loads project config only for trusted projects, and asks you to approve new hooks: run /hooks once.\n  \
+         Sandbox profile `six-ten` lets agents commit (.git writable; .git/hooks and .git/config stay read-only)."
     );
     Ok(())
 }
@@ -178,17 +197,61 @@ fn opencode(root: &Path) -> Result<()> {
     Ok(())
 }
 
-/// Hermes only reads global config (~/.hermes/config.yaml), so print the snippet instead of editing it.
+/// Hermes config is global: install the plugin into its home and let Hermes's own CLI enable it
+/// and register the MCP server, rather than editing config.yaml ourselves.
 fn hermes(root: &Path) -> Result<()> {
     protocol_block(&root.join("AGENTS.md"))?;
-    println!(
-        "hermes: protocol in AGENTS.md. Hermes config is global; add this to ~/.hermes/config.yaml:\n\n\
-         hooks:\n  pre_tool_call:\n    - matcher: \"write_file|patch|terminal\"\n      command: \"{BIN} hook hermes\"\n      timeout: 30\n  \
-         post_tool_call:\n    - matcher: \"read_file|write_file|patch|terminal\"\n      command: \"{BIN} hook hermes\"\n  \
-         pre_llm_call:\n    - command: \"{BIN} hook hermes\"\n  \
-         on_session_end:\n    - command: \"{BIN} hook hermes\"\n  on_session_finalize:\n    - command: \"{BIN} hook hermes\"\n\
-         mcp_servers:\n  six-ten:\n    command: \"{BIN}\"\n    args: [\"mcp\"]\n"
-    );
+    let home = std::env::var("HERMES_HOME")
+        .ok()
+        .filter(|h| !h.is_empty())
+        .map(PathBuf::from)
+        .or_else(|| {
+            std::env::var("HOME")
+                .ok()
+                .map(|h| Path::new(&h).join(".hermes"))
+        })
+        .context("cannot locate the Hermes home (set HERMES_HOME)")?;
+    let dir = home.join("plugins/six-ten");
+    fs::create_dir_all(&dir)?;
+    fs::write(
+        dir.join("plugin.yaml"),
+        include_str!("../integrations/hermes/six-ten/plugin.yaml"),
+    )?;
+    fs::write(
+        dir.join("__init__.py"),
+        include_str!("../integrations/hermes/six-ten/__init__.py"),
+    )?;
+    println!("hermes: plugin in {}, protocol in AGENTS.md", dir.display());
+
+    let hermes = |args: &[&str]| {
+        Command::new("hermes")
+            .args(args)
+            .stdin(std::process::Stdio::null())
+            .output()
+    };
+    let enabled = hermes(&["plugins", "enable", "six-ten"]).is_ok_and(|o| o.status.success());
+    let listed =
+        hermes(&["mcp", "list"]).is_ok_and(|o| String::from_utf8_lossy(&o.stdout).contains(BIN));
+    let mcp = listed
+        || hermes(&["mcp", "add", BIN, "--command", BIN, "--args", "mcp"])
+            .is_ok_and(|o| o.status.success());
+    if enabled && mcp {
+        println!("  enabled the plugin and registered the MCP server with the hermes CLI");
+    } else {
+        println!(
+            "  finish with:{}{}",
+            if enabled {
+                ""
+            } else {
+                "\n    hermes plugins enable six-ten"
+            },
+            if mcp {
+                ""
+            } else {
+                "\n    hermes mcp add six-ten --command six-ten --args mcp"
+            }
+        );
+    }
     Ok(())
 }
 
