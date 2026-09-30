@@ -238,6 +238,7 @@ pub fn icon(kind: &str) -> &'static str {
         "resolved" => "✅",
         "stale" => "🔄",
         "refused" => "⛔",
+        "session" => "🛣️",
         _ => "⚠️",
     }
 }
