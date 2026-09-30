@@ -6,7 +6,7 @@ use std::path::PathBuf;
 use anyhow::Result;
 use serde::{Deserialize, Serialize};
 
-use crate::store::{Store, blocks, hex_sha, now, read_json, write_json};
+use crate::store::{Store, foreign, hex_sha, now, read_json, write_json};
 
 /// One completed write: `after` is the git blob of the new content (None = deleted).
 #[derive(Debug, Clone, Serialize, Deserialize)]
@@ -56,11 +56,6 @@ impl Stale {
     pub fn is_empty(&self) -> bool {
         self.targets.is_empty() && self.seen.is_empty() && self.unseen.is_empty()
     }
-}
-
-/// Whether a change made by `writer` is news to `me` (not itself, its parent or its subagent).
-fn foreign(writer: &str, me: &str) -> bool {
-    blocks(writer, me) && blocks(me, writer)
 }
 
 impl Store {

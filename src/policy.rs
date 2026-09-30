@@ -246,9 +246,7 @@ pub fn pre_shell(store: &Store, agent: &Agent, cwd: &Path, command: &str) -> Res
 
 /// Rejects a commit that sweeps in files other live agents are editing or have left uncommitted.
 pub fn pre_commit(store: &Store, agent: &Agent) -> Result<Decision> {
-    if std::env::var("SIX_TEN_ALLOW_COMMIT").is_ok_and(|v| v == "1") {
-        return Ok(Decision::Allow);
-    }
+    let overridden = std::env::var("SIX_TEN_ALLOW_COMMIT").is_ok_and(|v| v == "1");
     let staged: HashSet<String> = git::staged(store.root())?.into_iter().collect();
     let mine = store.touched_by(&agent.id)?;
     let mut hits: Vec<String> = store
@@ -270,6 +268,14 @@ pub fn pre_commit(store: &Store, agent: &Agent) -> Result<Decision> {
     }
     hits.sort();
     hits.dedup();
+    if overridden {
+        let text = format!(
+            "committed other agents' work with SIX_TEN_ALLOW_COMMIT=1: {}",
+            hits.join(", ")
+        );
+        store.log(&agent.id, "override", text)?;
+        return Ok(Decision::Allow);
+    }
     store.log(
         &agent.id,
         "refused",
@@ -277,7 +283,7 @@ pub fn pre_commit(store: &Store, agent: &Agent) -> Result<Decision> {
     )?;
     Ok(Decision::Deny(format!(
         "six-ten: commit blocked, it includes other agents' work:\n  {}\nUnstage them (`git restore --staged <path>`) \
-         and commit only the files you changed. Set SIX_TEN_ALLOW_COMMIT=1 if the user wants them committed together.",
+         and commit only the files you changed. If they belong in this commit, ask the user.",
         hits.join("\n  ")
     )))
 }

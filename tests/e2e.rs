@@ -945,3 +945,35 @@ fn events_explain_blocks_and_how_they_were_resolved() {
     six(&dir, "x", &["notify", "off"]);
     assert!(!dir.join(".git/six-ten/notify").exists());
 }
+
+#[test]
+fn an_agent_may_commit_and_stash_its_own_subagents_work() {
+    let dir = repo();
+    let mut sub = edit(&dir, "src/a.rs");
+    sub["agent_id"] = json!("helper");
+    assert_eq!(hook(&dir, "alice", "claude", sub).status.code(), Some(0));
+    fs::write(dir.join("src/a.rs"), "helper's work\n").unwrap();
+    git(&dir, &["add", "src/a.rs"]);
+    assert_eq!(six(&dir, "alice", &["precommit"]).status.code(), Some(0));
+    assert_eq!(
+        hook(&dir, "alice", "claude", bash(&dir, "git stash"))
+            .status
+            .code(),
+        Some(0)
+    );
+    let refused = six(&dir, "bob", &["precommit"]);
+    assert_eq!(refused.status.code(), Some(2));
+    assert!(
+        !stderr(&refused).contains("SIX_TEN_ALLOW_COMMIT"),
+        "the override is for humans, not advertised to agents"
+    );
+    let forced = Command::new(BIN)
+        .current_dir(&dir)
+        .env("SIX_TEN_AGENT", "bob")
+        .env("SIX_TEN_ALLOW_COMMIT", "1")
+        .arg("precommit")
+        .output()
+        .unwrap();
+    assert!(forced.status.success());
+    assert_eq!(events(&dir).last().unwrap()["kind"], "override");
+}

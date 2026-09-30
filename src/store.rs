@@ -159,7 +159,7 @@ impl Store {
         Ok(self
             .list()?
             .into_iter()
-            .filter(|l| blocks(&l.agent, agent_id) && is_live(l, now))
+            .filter(|l| foreign(&l.agent, agent_id) && is_live(l, now))
             .collect())
     }
 
@@ -230,7 +230,7 @@ impl Store {
             let Some(mut t) = read_json::<Touched>(&entry?.path()) else {
                 continue;
             };
-            if !blocks(&t.agent, agent_id) || !t.pid.is_none_or(pid_alive) {
+            if !foreign(&t.agent, agent_id) || !t.pid.is_none_or(pid_alive) {
                 continue;
             }
             t.paths.retain(|p| dirty.contains(p));
@@ -298,6 +298,11 @@ impl Store {
         FileExt::unlock(&mutex)?;
         result
     }
+}
+
+/// Whether `a` and `b` are different agents, not the same agent or a parent and its subagent.
+pub fn foreign(a: &str, b: &str) -> bool {
+    blocks(a, b) && blocks(b, a)
 }
 
 /// Whether a lease held by `holder` stops `me`; an agent is never blocked by itself or its parent.

@@ -92,10 +92,22 @@ fn script_name(pid: u32, comm: &str) -> Option<String> {
         .output()
         .ok()?;
     let args = String::from_utf8_lossy(&out.stdout);
-    let script = args
-        .split_whitespace()
-        .skip(1)
-        .find(|a| !a.starts_with('-'))?;
+    // Launchers often run `python -c '<bootstrap>'`, so look for a known harness name first.
+    const KNOWN: &[&str] = &[
+        "hermes", "opencode", "codex", "claude", "aider", "goose", "gemini", "crush",
+    ];
+    if let Some(known) = KNOWN.iter().find(|k| args.contains(*k)) {
+        return Some(known.to_string());
+    }
+    let mut words = args.split_whitespace().skip(1);
+    let script = loop {
+        match words.next()? {
+            "-c" => return None,
+            "-m" => break words.next()?,
+            w if w.starts_with('-') => continue,
+            w => break w,
+        }
+    };
     let name = script
         .rsplit('/')
         .next()?
