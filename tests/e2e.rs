@@ -17,7 +17,7 @@ fn repo() -> PathBuf {
     ));
     let _ = fs::remove_dir_all(&dir);
     fs::create_dir_all(dir.join("src")).unwrap();
-    git(&dir, &["init", "-q", "-b", "main"]);
+    git(&dir, &["init", "-q", "-b", "dev"]);
     fs::write(dir.join("src/a.rs"), "a\n").unwrap();
     fs::write(dir.join("src/b.rs"), "b\n").unwrap();
     git(&dir, &["add", "."]);
@@ -1096,4 +1096,307 @@ fn generic_contract_covers_the_full_lifecycle() {
         .code(),
         Some(0)
     );
+}
+
+#[test]
+fn global_install_keeps_existing_user_config() {
+    let home = std::env::temp_dir().join(format!("six-ten-home-{}", std::process::id()));
+    let _ = fs::remove_dir_all(&home);
+    let cfg = home.join(".config");
+    fs::create_dir_all(home.join(".claude")).unwrap();
+    fs::create_dir_all(home.join(".codex")).unwrap();
+    fs::create_dir_all(cfg.join("opencode")).unwrap();
+    fs::write(home.join(".claude/settings.json"), r#"{"model": "x", "hooks": {"PreToolUse": [{"matcher": "Bash", "hooks": [{"type": "command", "command": "mine"}]}]}}"#).unwrap();
+    fs::write(
+        home.join(".codex/config.toml"),
+        "sandbox_mode = \"workspace-write\"\n\n[mcp_servers.other]\ncommand = \"x\"\n",
+    )
+    .unwrap();
+    fs::write(cfg.join("opencode/opencode.jsonc"), "{\n  // my comment\n  \"mcp\": {\n    \"other\": {\"type\": \"local\", \"command\": [\"x\"]}\n  }\n}\n").unwrap();
+    let run = || {
+        Command::new(BIN)
+            .args(["install", "all", "--global"])
+            .env("HOME", &home)
+            .env("XDG_CONFIG_HOME", &cfg)
+            .env("CODEX_HOME", home.join(".codex"))
+            .env("HERMES_HOME", home.join(".hermes"))
+            .env("PATH", "/usr/bin:/bin")
+            .output()
+            .unwrap()
+    };
+    for _ in 0..2 {
+        let out = run();
+        assert!(out.status.success(), "{}", stderr(&out));
+    }
+    let settings: Value =
+        serde_json::from_str(&fs::read_to_string(home.join(".claude/settings.json")).unwrap())
+            .unwrap();
+    assert_eq!(settings["model"], "x");
+    let pre = settings["hooks"]["PreToolUse"].as_array().unwrap();
+    assert_eq!(pre.len(), 2, "user's own hook kept, ours added once");
+    assert!(pre[0].to_string().contains("mine"));
+    assert!(
+        fs::read_to_string(home.join(".claude/CLAUDE.md"))
+            .unwrap()
+            .contains("six-ten:begin")
+    );
+    let codex = fs::read_to_string(home.join(".codex/config.toml")).unwrap();
+    assert!(
+        codex.starts_with("default_permissions = \"six-ten\"\n")
+            && codex.contains("[mcp_servers.other]")
+    );
+    assert_eq!(codex.matches("[mcp_servers.six-ten]").count(), 1);
+    assert!(
+        fs::read_to_string(home.join(".codex/hooks.json"))
+            .unwrap()
+            .contains("six-ten hook codex")
+    );
+    let jsonc = fs::read_to_string(cfg.join("opencode/opencode.jsonc")).unwrap();
+    assert!(
+        jsonc.contains("// my comment") && jsonc.matches("\"six-ten\":").count() == 1,
+        "{jsonc}"
+    );
+    let stripped: String = jsonc
+        .lines()
+        .filter(|l| !l.trim_start().starts_with("//"))
+        .collect::<Vec<_>>()
+        .join("\n");
+    let parsed: Value =
+        serde_json::from_str(&stripped).expect("still valid JSON once comments are removed");
+    assert_eq!(
+        parsed["mcp"]["six-ten"]["command"],
+        json!(["six-ten", "mcp"])
+    );
+    assert!(cfg.join("opencode/plugins/six-ten.ts").exists());
+    assert!(home.join(".hermes/plugins/six-ten/__init__.py").exists());
+    assert!(cfg.join("six-ten/hooked/codex").exists());
+
+    // A repo with no per-repo install still gets the lean MCP tool list for a globally hooked harness.
+    let dir = repo();
+    let out = Command::new(BIN)
+        .current_dir(&dir)
+        .env("SIX_TEN_AGENT", "codex:1")
+        .env("XDG_CONFIG_HOME", &cfg)
+        .arg("mcp")
+        .stdin(Stdio::piped())
+        .stdout(Stdio::piped())
+        .spawn()
+        .unwrap();
+    let mut child = out;
+    writeln!(
+        child.stdin.take().unwrap(),
+        "{}",
+        json!({"jsonrpc": "2.0", "id": 1, "method": "tools/list"})
+    )
+    .unwrap();
+    let reply: Value = serde_json::from_slice(&child.wait_with_output().unwrap().stdout).unwrap();
+    assert_eq!(reply["result"]["tools"].as_array().unwrap().len(), 3);
+}
+
+#[test]
+fn commit_guard_installs_itself_without_setup() {
+    let dir = repo();
+    let hook_file = dir.join(".git/hooks/pre-commit");
+    fs::write(&hook_file, "#!/bin/sh\necho existing-hook\n").unwrap();
+    assert_eq!(
+        hook(&dir, "alice", "claude", edit(&dir, "src/a.rs"))
+            .status
+            .code(),
+        Some(0)
+    );
+    let body = fs::read_to_string(&hook_file).unwrap();
+    assert!(
+        body.contains("six-ten precommit || exit 1") && body.contains("echo existing-hook"),
+        "{body}"
+    );
+    hook(&dir, "alice", "claude", edit(&dir, "src/a.rs"));
+    assert_eq!(
+        fs::read_to_string(&hook_file)
+            .unwrap()
+            .matches("six-ten precommit")
+            .count(),
+        1
+    );
+
+    // Hooks kept in tracked files (Husky-style core.hooksPath) are the project's: leave them alone.
+    let husky = repo();
+    fs::create_dir_all(husky.join(".husky")).unwrap();
+    git(&husky, &["config", "core.hooksPath", ".husky"]);
+    hook(&husky, "alice", "claude", edit(&husky, "src/a.rs"));
+    assert!(!husky.join(".husky/pre-commit").exists());
+}
+
+fn commit(dir: &Path, agent: &str, msg: &str) -> Output {
+    Command::new("git")
+        .current_dir(dir)
+        .env("SIX_TEN_AGENT", agent)
+        .env(
+            "PATH",
+            format!(
+                "{}:{}",
+                Path::new(BIN).parent().unwrap().display(),
+                std::env::var("PATH").unwrap()
+            ),
+        )
+        .args([
+            "-c",
+            "user.name=t",
+            "-c",
+            "user.email=t@t",
+            "commit",
+            "-qm",
+            msg,
+        ])
+        .output()
+        .unwrap()
+}
+
+#[test]
+fn shared_files_wait_for_the_co_editor_and_carry_trailers() {
+    let dir = repo();
+    edit_as(&dir, "alice", "src/a.rs", "a\nalice\n");
+    // Bob edits the same file and is still mid-turn.
+    hook(
+        &dir,
+        "bob",
+        "claude",
+        tool(&dir, "PreToolUse", "Edit", "src/a.rs"),
+    );
+    fs::write(dir.join("src/a.rs"), "a\nalice\nbob\n").unwrap();
+    hook(
+        &dir,
+        "bob",
+        "claude",
+        tool(&dir, "PostToolUse", "Edit", "src/a.rs"),
+    );
+    git(&dir, &["add", "src/a.rs"]);
+    let refused = commit(&dir, "alice", "alice: a");
+    assert!(!refused.status.success());
+    assert!(
+        stderr(&refused).contains("you both edited it; bob is still working"),
+        "{}",
+        stderr(&refused)
+    );
+
+    hook(
+        &dir,
+        "bob",
+        "claude",
+        json!({"hook_event_name": "Stop", "cwd": dir}),
+    );
+    let ok = commit(&dir, "alice", "alice: a");
+    assert!(ok.status.success(), "{}", stderr(&ok));
+    let msg = String::from_utf8(
+        Command::new("git")
+            .current_dir(&dir)
+            .args(["log", "-1", "--format=%B"])
+            .output()
+            .unwrap()
+            .stdout,
+    )
+    .unwrap();
+    assert!(
+        msg.contains("Agent: alice") && msg.contains("Co-edited-by: bob"),
+        "{msg}"
+    );
+}
+
+#[test]
+fn branch_switches_wait_for_agents_that_have_not_edited_yet() {
+    let dir = repo();
+    assert_eq!(
+        hook(
+            &dir,
+            "alice",
+            "claude",
+            bash(&dir, "git switch -c agents/2026-09-29-a")
+        )
+        .status
+        .code(),
+        Some(0),
+        "alone: allowed"
+    );
+    // Bob has only started his turn: no leases, no edits.
+    hook(
+        &dir,
+        "bob",
+        "claude",
+        json!({"hook_event_name": "UserPromptSubmit", "cwd": dir, "prompt": "go"}),
+    );
+    let out = hook(
+        &dir,
+        "alice",
+        "claude",
+        bash(&dir, "git switch -c agents/2026-09-29-b"),
+    );
+    assert_eq!(out.status.code(), Some(2));
+    assert!(stderr(&out).contains("bob (active"), "{}", stderr(&out));
+    assert_eq!(
+        hook(&dir, "alice", "claude", bash(&dir, "git status"))
+            .status
+            .code(),
+        Some(0)
+    );
+    let status = String::from_utf8(six(&dir, "alice", &["status"]).stdout).unwrap();
+    assert!(status.contains("other agents active: bob"), "{status}");
+}
+
+#[test]
+fn agents_commit_on_one_session_branch_started_by_whoever_is_first() {
+    let dir = repo();
+    git(&dir, &["switch", "-q", "-c", "main"]);
+    edit_as(&dir, "alice", "src/a.rs", "a\nalice\n");
+    git(&dir, &["add", "src/a.rs"]);
+    let refused = commit(&dir, "alice", "alice: a");
+    assert!(!refused.status.success());
+    assert!(
+        stderr(&refused).contains("six-ten session <topic>"),
+        "{}",
+        stderr(&refused)
+    );
+
+    // Both agents ask for a session at once: one branch, shared.
+    let racers: Vec<_> = ["alice", "bob"]
+        .iter()
+        .map(|a| {
+            Command::new(BIN)
+                .current_dir(&dir)
+                .env("SIX_TEN_AGENT", a)
+                .args(["session", "Auth Flow!"])
+                .output()
+        })
+        .collect();
+    let texts: Vec<String> = racers
+        .into_iter()
+        .map(|o| String::from_utf8(o.unwrap().stdout).unwrap())
+        .collect();
+    assert_eq!(
+        texts.iter().filter(|t| t.starts_with("started")).count(),
+        1,
+        "{texts:?}"
+    );
+    let branch = String::from_utf8(
+        Command::new("git")
+            .current_dir(&dir)
+            .args(["branch", "--show-current"])
+            .output()
+            .unwrap()
+            .stdout,
+    )
+    .unwrap();
+    assert!(
+        branch.trim().starts_with("agents/") && branch.trim().ends_with("-auth-flow"),
+        "{branch}"
+    );
+    assert_eq!(
+        fs::read_to_string(dir.join("src/a.rs")).unwrap(),
+        "a\nalice\n",
+        "work untouched"
+    );
+    assert!(commit(&dir, "alice", "alice: a").status.success());
+    // Humans may still commit on main.
+    git(&dir, &["switch", "-q", "main"]);
+    fs::write(dir.join("src/b.rs"), "human\n").unwrap();
+    git(&dir, &["add", "src/b.rs"]);
+    assert!(commit(&dir, "someone", "human commit").status.success());
 }

@@ -96,11 +96,13 @@ pub fn handle(harness: &str, payload: &Value) -> Result<Decision> {
     };
     let base = Agent::current();
     store.mark_hooked(crate::store::harness_of(&base.id))?;
+    let _ = crate::install::ensure_git_hook(&store);
     let agent = match &sub {
         Some(s) => base.sub(s),
         None => base,
     };
     // After a tool call, pass on news right away; Hermes cannot annotate a finished call.
+    store.mark_present(&agent)?;
     let done = |r: Result<()>| {
         r?;
         if harness == "hermes" {

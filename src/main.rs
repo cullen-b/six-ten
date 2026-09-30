@@ -39,6 +39,8 @@ enum Command {
     },
     /// Release your claims (all of them when no paths are given).
     Release { paths: Vec<String> },
+    /// Put this checkout on a session branch (agents/<date>-<topic>), or report the one in use.
+    Session { topic: Option<String> },
     /// Show who is editing what.
     Status,
     /// Print the agent id six-ten sees for the calling process.
@@ -59,12 +61,17 @@ enum Command {
     Mcp,
     /// Git pre-commit check: refuse commits that include other agents' work.
     Precommit,
+    /// Git commit-msg hook: add Agent and Co-edited-by trailers to the message file.
+    CommitMsg { file: PathBuf },
     /// Wire six-ten into a harness for the repository at --repo (default: current directory).
     Install {
         /// claude, codex, opencode, hermes, generic (any other harness), git, or all
         harness: String,
-        #[arg(long)]
+        #[arg(long, conflicts_with = "global")]
         repo: Option<PathBuf>,
+        /// Install into the user-level config, for every repository on this machine.
+        #[arg(long)]
+        global: bool,
     },
 }
 
@@ -94,9 +101,11 @@ fn run(command: Command) -> Result<u8> {
     match command {
         Command::Hook { harness } => Ok(hook::run(&harness) as u8),
         Command::Mcp => mcp::serve().map(|_| 0),
-        Command::Install { harness, repo } => {
-            install::run(&harness, &repo.unwrap_or(cwd)).map(|_| 0)
-        }
+        Command::Install {
+            harness,
+            repo,
+            global,
+        } => install::run(&harness, &repo.unwrap_or(cwd), global).map(|_| 0),
         Command::Whoami => {
             println!("{}", Agent::current().id);
             Ok(0)
@@ -125,6 +134,10 @@ fn run(command: Command) -> Result<u8> {
                     println!("released {} lease(s)", released.len());
                     Ok(0)
                 }
+                Command::Session { topic } => {
+                    println!("{}", policy::session(&store, &agent, topic.as_deref())?);
+                    Ok(0)
+                }
                 Command::Status => {
                     print!("{}", status_text(&store, &agent)?);
                     Ok(0)
@@ -151,6 +164,23 @@ fn run(command: Command) -> Result<u8> {
                     println!("removed {removed} stale record(s)");
                     Ok(0)
                 }
+                Command::CommitMsg { file } => {
+                    for trailer in policy::commit_trailers(&store, &agent)? {
+                        let status = std::process::Command::new("git")
+                            .args([
+                                "interpret-trailers",
+                                "--in-place",
+                                "--if-exists",
+                                "addIfDifferent",
+                                "--trailer",
+                                &trailer,
+                            ])
+                            .arg(&file)
+                            .status()?;
+                        anyhow::ensure!(status.success(), "git interpret-trailers failed");
+                    }
+                    Ok(0)
+                }
                 Command::Precommit => {
                     Ok(decided(policy::pre_commit(&store, &agent)?, String::new()))
                 }
@@ -163,6 +193,22 @@ fn run(command: Command) -> Result<u8> {
 pub fn status_text(store: &Store, me: &Agent) -> Result<String> {
     let now = now();
     let mut out = format!("you are {}\n", me.id);
+    let active = store.active_others(&me.id)?;
+    if active.is_empty() {
+        out.push_str("no other agents active\n");
+    } else {
+        let list: Vec<String> = active
+            .iter()
+            .map(|p| {
+                format!(
+                    "{} ({} ago)",
+                    p.agent,
+                    policy::human(now.saturating_sub(p.at))
+                )
+            })
+            .collect();
+        out.push_str(&format!("other agents active: {}\n", list.join(", ")));
+    }
     let leases = store.live()?;
     if leases.is_empty() {
         out.push_str("no files are being edited\n");

@@ -106,6 +106,67 @@ fn empty_blob(root: &Path) -> String {
         .unwrap_or_else(|| "e69de29bb2d1d6434b8b29ae775ad8c2e48c5391".into())
 }
 
+fn git_text(root: &Path, args: &[&str]) -> Option<String> {
+    let out = Command::new("git")
+        .arg("-C")
+        .arg(root)
+        .args(args)
+        .output()
+        .ok()?;
+    out.status
+        .success()
+        .then(|| String::from_utf8_lossy(&out.stdout).trim().to_string())
+}
+
+pub fn current_branch(root: &Path) -> Option<String> {
+    git_text(root, &["symbolic-ref", "--short", "-q", "HEAD"])
+}
+
+/// `main`, `master`, or whatever `origin/HEAD` points at.
+pub fn is_default_branch(root: &Path, branch: &str) -> bool {
+    let remote_default = git_text(
+        root,
+        &["symbolic-ref", "--short", "-q", "refs/remotes/origin/HEAD"],
+    );
+    matches!(branch, "main" | "master")
+        || remote_default.is_some_and(|r| r.strip_prefix("origin/") == Some(branch))
+}
+
+/// Session branches are on unless the repo sets `git config six-ten.sessionBranches false`.
+pub fn session_branches_enabled(root: &Path) -> bool {
+    git_text(root, &["config", "--type=bool", "six-ten.sessionBranches"])
+        .is_none_or(|v| v != "false")
+}
+
+pub fn branch_exists(root: &Path, branch: &str) -> bool {
+    git_text(
+        root,
+        &[
+            "rev-parse",
+            "--verify",
+            "-q",
+            &format!("refs/heads/{branch}"),
+        ],
+    )
+    .is_some()
+}
+
+/// Creates `branch` at HEAD and checks it out; the working tree and index are untouched.
+pub fn create_branch(root: &Path, branch: &str) -> Result<()> {
+    let out = Command::new("git")
+        .arg("-C")
+        .arg(root)
+        .args(["switch", "-q", "-c", branch])
+        .output()?;
+    if !out.status.success() {
+        bail!(
+            "git switch -c {branch} failed: {}",
+            String::from_utf8_lossy(&out.stderr).trim()
+        );
+    }
+    Ok(())
+}
+
 /// Paths staged for the next commit.
 pub fn staged(root: &Path) -> Result<Vec<String>> {
     let out = Command::new("git")
@@ -126,8 +187,10 @@ pub fn staged(root: &Path) -> Result<Vec<String>> {
 /// What a shell command would clobber in a shared checkout.
 #[derive(Debug, PartialEq)]
 pub enum Clobber {
-    /// Rewrites the whole working tree or switches branch for everyone.
+    /// Rewrites the whole working tree.
     Tree(String),
+    /// Creates or switches branches: every agent in the checkout would start committing elsewhere.
+    Branch(String),
     /// Overwrites or deletes specific paths (relative to the command's cwd).
     Paths(String, Vec<String>),
 }
@@ -240,7 +303,7 @@ pub fn clobbers(command: &str) -> Vec<Clobber> {
             "checkout" if !args.is_empty() => match after_dashdash {
                 Some(paths) => found.push(paths_or_tree(paths)),
                 None if positional.iter().any(|p| p == ".") => found.push(Clobber::Tree(label)),
-                None => found.push(Clobber::Tree(format!(
+                None => found.push(Clobber::Branch(format!(
                     "{label} (switches the branch for every agent)"
                 ))),
             },
@@ -258,7 +321,7 @@ pub fn clobbers(command: &str) -> Vec<Clobber> {
             "clean" if !args.iter().any(|a| matches!(*a, "-n" | "--dry-run")) => {
                 found.push(Clobber::Tree(label))
             }
-            "switch" => found.push(Clobber::Tree(format!(
+            "switch" => found.push(Clobber::Branch(format!(
                 "{label} (switches the branch for every agent)"
             ))),
             "rebase" | "pull" | "merge" | "am" | "revert" | "cherry-pick" => {
@@ -298,7 +361,11 @@ mod tests {
                 vec!["src/x.rs".into()]
             )]
         );
-        assert!(matches!(clobbers("git switch main")[0], Clobber::Tree(_)));
+        assert!(matches!(clobbers("git switch main")[0], Clobber::Branch(_)));
+        assert!(matches!(
+            clobbers("git checkout -b agents/x")[0],
+            Clobber::Branch(_)
+        ));
         assert!(matches!(clobbers("git clean -fd")[0], Clobber::Tree(_)));
     }
 

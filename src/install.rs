@@ -13,55 +13,105 @@ const GIT_RULES: &str = "[permissions.six-ten.filesystem.\":workspace_roots\"]\n
 
 const PROTOCOL: &str = "## Working alongside other agents (six-ten)
 
-Several agents may be editing this checkout at the same time; six-ten keeps you from colliding.
+Several agents may share this checkout; six-ten keeps you from colliding.
 
-- Just edit. With six-ten hooks installed your edits are claimed automatically: don't call
-  `six_ten_claim` or `six_ten_status` before ordinary edits. (Only if `six_ten_claim` is in your
-  tool list does your harness lack hooks; then claim files right before editing them.)
+- Just edit. Edits are claimed automatically; claim files first only if `six_ten_claim` is in your
+  tool list.
 - If an edit is refused because another agent holds the file, work on other files and retry later.
   Call `six_ten_wait` only when nothing else is left. Never get around a refusal with the shell.
 - Notes from six-ten are diffs of other agents' changes: account for them; re-read only when told to.
-- Never run `git stash`, `reset --hard`, `checkout`/`switch`, `restore`, `clean` or `pull` while
-  other agents are active. Commit only your files: `git add <paths>`, never `git add -A`/`commit -a`.";
+- Branches: all agents share the checked-out branch; never create or switch branches yourself.
+  Before your first commit, run `six-ten session <topic>`: it starts today's session branch, or
+  reuses the one another agent already started.
+- Commit your own finished files as you go: `git add <paths>` and commit, never `git add -A` or
+  `commit -a`. If a shared file is refused, commit the rest now and that file after the other
+  agent's turn ends. `Agent:` / `Co-edited-by:` trailers are added for you.
+- Tests may fail in files other agents are editing (see `six-ten status`); those aren't yours to fix.
+- Never `stash`, `reset --hard`, `checkout`/`switch`, `restore`, `clean` or `pull` while other
+  agents are active. To undo your own work, restore just your files by path.
+- The session branch goes into `main` once, at the end, through a PR (unless the user says otherwise).";
 
-pub fn run(harness: &str, repo: &Path) -> Result<()> {
-    let root = git_out(repo, &["rev-parse", "--show-toplevel"])
-        .context("--repo must be inside a git repository")?;
-    let root = Path::new(root.trim());
-    match harness {
-        "claude" => claude(root)?,
-        "codex" => codex(root)?,
-        "opencode" => opencode(root)?,
-        "hermes" => hermes(root)?,
-        "git" => git_hook(root)?,
-        "generic" => {
-            protocol_block(&root.join("AGENTS.md"))?;
-            git_hook(root)?;
-            println!(
-                "generic: protocol in AGENTS.md. Register `{BIN} mcp` as a stdio MCP server in your harness.\n  \
-                 For enforcement, forward its tool hooks to `{BIN} hook generic` (README: \"Adding a harness\")."
-            );
+/// Where a harness's configuration goes: one repository, or the user's global config.
+enum Scope {
+    Repo(PathBuf),
+    Global(PathBuf),
+}
+
+impl Scope {
+    /// Directory the harness keeps its config in (`.claude`, `.codex`, `.opencode`, ...).
+    fn dir(&self, repo: &str, global: &str) -> PathBuf {
+        match self {
+            Scope::Repo(root) => root.join(repo),
+            Scope::Global(home) => home.join(global),
         }
-        "all" => {
-            claude(root)?;
-            codex(root)?;
-            opencode(root)?;
-            hermes(root)?;
-            git_hook(root)?;
+    }
+}
+
+fn home() -> Result<PathBuf> {
+    std::env::var("HOME")
+        .map(PathBuf::from)
+        .context("HOME is not set")
+}
+
+/// `$XDG_CONFIG_HOME` or `~/.config`.
+pub fn config_home() -> Option<PathBuf> {
+    std::env::var("XDG_CONFIG_HOME")
+        .ok()
+        .filter(|d| !d.is_empty())
+        .map(PathBuf::from)
+        .or_else(|| {
+            std::env::var("HOME")
+                .ok()
+                .map(|h| Path::new(&h).join(".config"))
+        })
+}
+
+pub fn run(harness: &str, repo: &Path, global: bool) -> Result<()> {
+    let scope = if global {
+        Scope::Global(home()?)
+    } else {
+        let root = git_out(repo, &["rev-parse", "--show-toplevel"])
+            .context("--repo must be inside a git repository (or pass --global)")?;
+        Scope::Repo(PathBuf::from(root.trim()))
+    };
+    let all = ["claude", "codex", "opencode", "hermes", "git"];
+    let names: Vec<&str> = if harness == "all" {
+        all.to_vec()
+    } else {
+        vec![harness]
+    };
+    for name in &names {
+        match *name {
+            "claude" => claude(&scope)?,
+            "codex" => codex(&scope)?,
+            "opencode" => opencode(&scope)?,
+            "hermes" => hermes(&scope)?,
+            "git" if global => println!(
+                "git: automatic; each repo gets the pre-commit check the first time an agent works in it"
+            ),
+            "generic" if global => println!(
+                "generic: per-repository only; run `{BIN} install generic` inside the repo"
+            ),
+            "git" => git_hook(repo_root(&scope))?,
+            "generic" => {
+                protocol_block(&repo_root(&scope).join("AGENTS.md"))?;
+                git_hook(repo_root(&scope))?;
+                println!(
+                    "generic: protocol in AGENTS.md. Register `{BIN} mcp` as a stdio MCP server in your harness.\n  \
+                     For enforcement, forward its tool hooks to `{BIN} hook generic` (README: \"Adding a harness\")."
+                );
+            }
+            other => bail!(
+                "unknown harness `{other}` (expected claude, codex, opencode, hermes, generic, git or all)"
+            ),
         }
-        other => bail!(
-            "unknown harness `{other}` (expected claude, codex, opencode, hermes, generic, git or all)"
-        ),
     }
     // The MCP server hides six_ten_claim from harnesses whose hooks already claim edits.
-    let hooked: Vec<&str> = match harness {
-        "all" => vec!["claude", "codex", "opencode", "hermes"],
-        "git" | "generic" => vec![],
-        one => vec![one],
-    };
-    let store = crate::store::Store::open(root)?;
-    for h in hooked {
-        store.mark_hooked(h)?;
+    for name in names.iter().filter(|n| !matches!(**n, "git" | "generic")) {
+        match &scope {
+            Scope::Repo(root) => crate::store::Store::open(root)?.mark_hooked(name)?,
+            Scope::Global(_) => crate::store::mark_hooked_globally(name)?,
+        }
     }
     if Command::new(BIN).arg("--version").output().is_err() {
         eprintln!(
@@ -71,8 +121,14 @@ pub fn run(harness: &str, repo: &Path) -> Result<()> {
     Ok(())
 }
 
-fn claude(root: &Path) -> Result<()> {
-    let settings = root.join(".claude/settings.json");
+fn repo_root(scope: &Scope) -> &Path {
+    match scope {
+        Scope::Repo(root) | Scope::Global(root) => root,
+    }
+}
+
+fn claude(scope: &Scope) -> Result<()> {
+    let settings = scope.dir(".claude", ".claude").join("settings.json");
     let mut doc = read_json(&settings)?;
     let hooks = doc
         .as_object_mut()
@@ -104,28 +160,57 @@ fn claude(root: &Path) -> Result<()> {
         "allow",
         &["mcp__six-ten", "Bash(six-ten:*)"],
     )?;
-    add_unique(&mut doc, "enabledMcpjsonServers", &[BIN])?;
-    write_json(&settings, &doc)?;
-
-    let mcp = root.join(".mcp.json");
-    let mut doc = read_json(&mcp)?;
-    let servers = doc
-        .as_object_mut()
-        .context(".mcp.json is not an object")?
-        .entry("mcpServers")
-        .or_insert(json!({}));
-    servers[BIN] = json!({"command": BIN, "args": ["mcp"]});
-    write_json(&mcp, &doc)?;
-
-    protocol_block(&root.join("CLAUDE.md"))?;
-    println!(
-        "claude: hooks in .claude/settings.json, MCP server in .mcp.json, protocol in CLAUDE.md"
-    );
+    match scope {
+        Scope::Repo(root) => {
+            add_unique(&mut doc, "enabledMcpjsonServers", &[BIN])?;
+            write_json(&settings, &doc)?;
+            let mcp = root.join(".mcp.json");
+            let mut doc = read_json(&mcp)?;
+            let servers = doc
+                .as_object_mut()
+                .context(".mcp.json is not an object")?
+                .entry("mcpServers")
+                .or_insert(json!({}));
+            servers[BIN] = json!({"command": BIN, "args": ["mcp"]});
+            write_json(&mcp, &doc)?;
+            protocol_block(&root.join("CLAUDE.md"))?;
+            println!(
+                "claude: hooks in .claude/settings.json, MCP server in .mcp.json, protocol in CLAUDE.md"
+            );
+        }
+        Scope::Global(home) => {
+            write_json(&settings, &doc)?;
+            protocol_block(&home.join(".claude/CLAUDE.md"))?;
+            // User-scope MCP servers live in ~/.claude.json, which Claude Code owns: use its CLI.
+            let registered = Command::new("claude")
+                .args(["mcp", "get", BIN])
+                .output()
+                .is_ok_and(|o| o.status.success())
+                || Command::new("claude")
+                    .args(["mcp", "add", "--scope", "user", BIN, "--", BIN, "mcp"])
+                    .output()
+                    .is_ok_and(|o| o.status.success());
+            println!(
+                "claude: hooks and permissions in ~/.claude/settings.json, protocol in ~/.claude/CLAUDE.md"
+            );
+            if registered {
+                println!("  MCP server registered for all projects (claude mcp, user scope)");
+            } else {
+                println!("  finish with: claude mcp add --scope user {BIN} -- {BIN} mcp");
+            }
+        }
+    }
     Ok(())
 }
 
-fn codex(root: &Path) -> Result<()> {
-    let hooks_file = root.join(".codex/hooks.json");
+fn codex(scope: &Scope) -> Result<()> {
+    let dir = match scope {
+        Scope::Global(home) => std::env::var("CODEX_HOME")
+            .map(PathBuf::from)
+            .unwrap_or_else(|_| home.join(".codex")),
+        Scope::Repo(root) => root.join(".codex"),
+    };
+    let hooks_file = dir.join("hooks.json");
     let mut doc = read_json(&hooks_file)?;
     let hooks = doc
         .as_object_mut()
@@ -150,7 +235,7 @@ fn codex(root: &Path) -> Result<()> {
     merge_hooks(hooks, wanted)?;
     write_json(&hooks_file, &doc)?;
 
-    let config = root.join(".codex/config.toml");
+    let config = dir.join("config.toml");
     let mut text = fs::read_to_string(&config).unwrap_or_default();
     if !text.is_empty() && !text.ends_with('\n') {
         text.push('\n');
@@ -181,24 +266,45 @@ fn codex(root: &Path) -> Result<()> {
     }
     fs::create_dir_all(config.parent().context("config path has no parent")?)?;
     fs::write(&config, text)?;
-    protocol_block(&root.join("AGENTS.md"))?;
+    let (agents, shown) = match scope {
+        Scope::Repo(root) => (root.join("AGENTS.md"), ".codex/".to_string()),
+        Scope::Global(_) => (dir.join("AGENTS.md"), format!("{}/", dir.display())),
+    };
+    protocol_block(&agents)?;
     println!(
-        "codex: hooks in .codex/hooks.json, MCP server in .codex/config.toml, protocol in AGENTS.md\n  \
-         Codex loads project config only for trusted projects, and asks you to approve new hooks: run /hooks once.\n  \
-         Sandbox profile `six-ten` lets agents commit (.git writable; .git/hooks and .git/config stay read-only)."
+        "codex: hooks in {shown}hooks.json, MCP server and sandbox profile in {shown}config.toml, protocol in {}\n  \
+         Codex asks you to approve new or changed hooks: run /hooks once{}.\n  \
+         Sandbox profile `six-ten` lets agents commit (.git writable; .git/hooks and .git/config stay read-only).",
+        agents.display(),
+        if matches!(scope, Scope::Repo(_)) {
+            " (and trust the project)"
+        } else {
+            ""
+        }
     );
     Ok(())
 }
 
-fn opencode(root: &Path) -> Result<()> {
-    let plugin = root.join(".opencode/plugins/six-ten.ts");
+fn opencode(scope: &Scope) -> Result<()> {
+    let (dir, config_dir) = match scope {
+        Scope::Repo(root) => (root.join(".opencode"), root.clone()),
+        Scope::Global(_) => {
+            let d = config_home()
+                .context("cannot locate ~/.config")?
+                .join("opencode");
+            (d.clone(), d)
+        }
+    };
+    let plugin = dir.join("plugins/six-ten.ts");
     fs::create_dir_all(plugin.parent().context("plugin path has no parent")?)?;
     fs::write(&plugin, include_str!("../integrations/opencode/six-ten.ts"))?;
-    let config = root.join("opencode.json");
     let mcp = json!({"type": "local", "command": [BIN, "mcp"], "enabled": true});
-    if root.join("opencode.jsonc").exists() {
-        println!("opencode: add to opencode.jsonc under \"mcp\": \"six-ten\": {mcp}");
+    let jsonc = config_dir.join("opencode.jsonc");
+    let config = if jsonc.exists() {
+        jsonc_add_mcp(&jsonc, &mcp)?;
+        jsonc
     } else {
+        let config = config_dir.join("opencode.json");
         let mut doc = read_json(&config)?;
         let obj = doc
             .as_object_mut()
@@ -207,18 +313,56 @@ fn opencode(root: &Path) -> Result<()> {
             .or_insert(json!("https://opencode.ai/config.json"));
         obj.entry("mcp").or_insert(json!({}))[BIN] = mcp;
         write_json(&config, &doc)?;
-    }
-    protocol_block(&root.join("AGENTS.md"))?;
+        config
+    };
+    let agents = config_dir.join("AGENTS.md");
+    protocol_block(&agents)?;
     println!(
-        "opencode: plugin in .opencode/plugins/six-ten.ts, MCP server in opencode.json, protocol in AGENTS.md"
+        "opencode: plugin in {}, MCP server in {}, protocol in {}",
+        plugin.display(),
+        config.display(),
+        agents.display()
     );
+    Ok(())
+}
+
+/// Adds the MCP server to an `opencode.jsonc` by text insertion, keeping the user's comments.
+fn jsonc_add_mcp(path: &Path, mcp: &Value) -> Result<()> {
+    let text = fs::read_to_string(path)?;
+    if text.contains(&format!("\"{BIN}\"")) {
+        return Ok(());
+    }
+    let entry = format!("\"{BIN}\": {mcp}");
+    let (at, insert) = match text
+        .find("\"mcp\"")
+        .and_then(|k| text[k..].find('{').map(|b| k + b + 1))
+    {
+        Some(at) => {
+            let rest = text[at..].trim_start();
+            let comma = if rest.starts_with('}') { "" } else { "," };
+            (at, format!("\n    {entry}{comma}"))
+        }
+        None => {
+            let at = text
+                .find('{')
+                .context("opencode.jsonc has no top-level object")?
+                + 1;
+            let rest = text[at..].trim_start();
+            let comma = if rest.starts_with('}') { "" } else { "," };
+            (at, format!("\n  \"mcp\": {{\n    {entry}\n  }}{comma}"))
+        }
+    };
+    fs::copy(path, path.with_extension("jsonc.six-ten-backup"))?;
+    fs::write(path, format!("{}{insert}{}", &text[..at], &text[at..]))?;
     Ok(())
 }
 
 /// Hermes config is global: install the plugin into its home and let Hermes's own CLI enable it
 /// and register the MCP server, rather than editing config.yaml ourselves.
-fn hermes(root: &Path) -> Result<()> {
-    protocol_block(&root.join("AGENTS.md"))?;
+fn hermes(scope: &Scope) -> Result<()> {
+    if let Scope::Repo(root) = scope {
+        protocol_block(&root.join("AGENTS.md"))?;
+    }
     let home = std::env::var("HERMES_HOME")
         .ok()
         .filter(|h| !h.is_empty())
@@ -229,6 +373,13 @@ fn hermes(root: &Path) -> Result<()> {
                 .map(|h| Path::new(&h).join(".hermes"))
         })
         .context("cannot locate the Hermes home (set HERMES_HOME)")?;
+    if let Scope::Global(_) = scope {
+        // Hermes's own global instructions, if the user keeps them.
+        let agents = home.join("AGENTS.md");
+        if agents.exists() {
+            protocol_block(&agents)?;
+        }
+    }
     let dir = home.join("plugins/six-ten");
     fs::create_dir_all(&dir)?;
     fs::write(
@@ -239,7 +390,10 @@ fn hermes(root: &Path) -> Result<()> {
         dir.join("__init__.py"),
         include_str!("../integrations/hermes/six-ten/__init__.py"),
     )?;
-    println!("hermes: plugin in {}, protocol in AGENTS.md", dir.display());
+    println!(
+        "hermes: plugin in {} (Hermes plugins are always global)",
+        dir.display()
+    );
 
     // Answers `mcp add`'s "Enable all tools? [Y/n]" prompt; it exits 0 even when cancelled.
     let hermes = |args: &[&str]| {
@@ -312,12 +466,68 @@ fn merge_hooks<const N: usize>(hooks: &mut Value, wanted: [(&str, Value); N]) ->
     Ok(())
 }
 
+/// Git hooks six-ten adds a line to: (hook name, line). The trailer hook never blocks a commit.
+const GIT_HOOKS: [(&str, &str); 2] = [
+    ("pre-commit", "six-ten precommit || exit 1"),
+    ("commit-msg", "six-ten commit-msg \"$1\" || true"),
+];
+
 fn git_hook(root: &Path) -> Result<()> {
-    let hook = git_out(root, &["rev-parse", "--git-path", "hooks/pre-commit"])?;
-    let hook = root.join(hook.trim());
-    let line = format!("{BIN} precommit || exit 1");
+    for (name, line) in GIT_HOOKS {
+        let hook = write_git_hook(&hook_path(root, name)?, line)?;
+        println!("git: {name} hook in {}", hook.display());
+    }
+    Ok(())
+}
+
+fn hook_path(root: &Path, name: &str) -> Result<PathBuf> {
+    let hook = git_out(root, &["rev-parse", "--git-path", &format!("hooks/{name}")])?;
+    Ok(root.join(hook.trim()))
+}
+
+/// Runs on every harness hook: gives the repo the commit guard and trailers without any setup.
+/// Hooks kept in the working tree (`core.hooksPath`, e.g. Husky) are the project's own files, so
+/// those are left alone.
+pub fn ensure_git_hook(store: &crate::store::Store) -> Result<()> {
+    let flag = store.dir.join("git-hooks");
+    if let Ok(recorded) = fs::read_to_string(&flag) {
+        let intact = recorded
+            .lines()
+            .zip(GIT_HOOKS)
+            .all(|(path, (_, line))| fs::read_to_string(path).is_ok_and(|b| b.contains(line)));
+        if recorded.trim() == "skip" || (recorded.lines().count() == GIT_HOOKS.len() && intact) {
+            return Ok(());
+        }
+    }
+    let root = store.root();
+    let git_dir = PathBuf::from(
+        git_out(
+            root,
+            &["rev-parse", "--path-format=absolute", "--git-common-dir"],
+        )?
+        .trim(),
+    );
+    let mut written = Vec::new();
+    for (name, line) in GIT_HOOKS {
+        let hook = hook_path(root, name)?;
+        let hook_dir = hook.parent().context("hook path has no parent")?;
+        fs::create_dir_all(hook_dir).ok();
+        let inside_git = hook_dir
+            .canonicalize()
+            .is_ok_and(|d| git_dir.canonicalize().is_ok_and(|g| d.starts_with(g)));
+        if !inside_git {
+            return fs::write(&flag, "skip").map_err(Into::into);
+        }
+        written.push(write_git_hook(&hook, line)?.to_string_lossy().into_owned());
+    }
+    fs::write(&flag, written.join("\n"))?;
+    Ok(())
+}
+
+fn write_git_hook(hook: &Path, line: &str) -> Result<PathBuf> {
+    let hook = hook.to_path_buf();
     let existing = fs::read_to_string(&hook).unwrap_or_default();
-    let body = if existing.contains(&line) {
+    let body = if existing.contains(line) {
         existing
     } else if existing.is_empty() {
         format!("#!/bin/sh\n{line}\n")
@@ -336,8 +546,7 @@ fn git_hook(root: &Path) -> Result<()> {
         use std::os::unix::fs::PermissionsExt;
         fs::set_permissions(&hook, fs::Permissions::from_mode(0o755))?;
     }
-    println!("git: pre-commit check in {}", hook.display());
-    Ok(())
+    Ok(hook)
 }
 
 /// Inserts or replaces the protocol section between six-ten markers.
