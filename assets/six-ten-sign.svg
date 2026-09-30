@@ -1,0 +1,21 @@
+<svg xmlns="http://www.w3.org/2000/svg" width="720" height="210" viewBox="0 0 720 210" role="img" aria-label="six-ten: keeps your agents in their lanes">
+  <title>six-ten: keeps your agents in their lanes</title>
+  <!-- Highway guide sign -->
+  <rect x="4" y="4" width="712" height="202" rx="18" fill="#00693E"/>
+  <rect x="14" y="14" width="692" height="182" rx="12" fill="none" stroke="#FFFFFF" stroke-width="5"/>
+
+  <!-- Route marker -->
+  <rect x="44" y="45" width="124" height="120" rx="14" fill="#FFFFFF" stroke="#1A1A1A" stroke-width="4"/>
+  <text x="106" y="84" text-anchor="middle" font-family="Helvetica, Arial, sans-serif" font-size="20" font-weight="700" fill="#1A1A1A" letter-spacing="3">LOOP</text>
+  <text x="106" y="145" text-anchor="middle" font-family="Helvetica, Arial, sans-serif" font-size="56" font-weight="700" fill="#1A1A1A">610</text>
+
+  <!-- Legend -->
+  <text x="200" y="104" font-family="Helvetica, Arial, sans-serif" font-size="68" font-weight="700" fill="#FFFFFF">six-ten</text>
+  <text x="203" y="146" font-family="Helvetica, Arial, sans-serif" font-size="25" fill="#FFFFFF">Keeps your agents in their lanes</text>
+
+  <!-- Lane arrows -->
+  <g fill="#FFFFFF">
+    <path d="M598 180 v-44 h-11 l19 -26 l19 26 h-11 v44 z"/>
+    <path d="M650 180 v-44 h-11 l19 -26 l19 26 h-11 v44 z"/>
+  </g>
+</svg>

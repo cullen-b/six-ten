@@ -1,6 +1,11 @@
+<p align="center">
+  <img src="assets/six-ten-sign.svg" alt="six-ten: keeps your agents in their lanes" width="640">
+</p>
+
 # six-ten
 
-**Run as many coding agents as you like in one repo, without them stepping on each other's toes.**
+**Keep your agents in their lanes.** Run as many coding agents as you like in one repo, without them
+stepping on each other's toes.
 
 six-ten is a small Rust binary that sits between your agents and your working tree. Before an agent
 edits a file, six-ten checks whether another agent is already editing it. If it is, the agent is told
@@ -18,7 +23,7 @@ Hermes** are supported out of the box, and anything with MCP or tool hooks can b
 🔄 codex:97632   stopped from overwriting src/shared.rs: hermes:97635 changed it since it was read
 ✅ codex:97632   re-read src/shared.rs and retried after hermes:97635's change
 ```
-<sub>A real `six-ten watch` feed: Claude Code, Codex and Hermes editing one file at once. Three clean commits, nothing lost.</sub>
+<sub>Live traffic report from `six-ten watch`: Claude Code, Codex and Hermes all merging onto one file at rush hour. Three clean commits, no pileups.</sub>
 
 ## Why
 
@@ -240,6 +245,21 @@ cargo test     # unit tests + end-to-end tests that drive the real binary agains
 The e2e suite covers lease races (16 processes, one winner), expiry, waiting, every harness's hook
 payloads, the git and commit guards, stale-write and change-note delivery, the MCP protocol, and the
 installers.
+
+## Why "six-ten"?
+
+It's named after Houston's **610 Loop**, the freeway ring around the city's core. Every lane is
+always merging with every other one, and everybody is trying to get somewhere at the same time.
+If you've run five agents in one repo, you've driven it.
+
+| On the Loop | In your repo |
+|---|---|
+| One car per lane | One agent per file (a lease) |
+| Merge ahead: yield | Blocked: work elsewhere, or `six_ten_wait` |
+| Traffic alert: lane shift ahead | Change note: someone changed a file you read |
+| Nobody closes the freeway at rush hour | No `git stash` / `reset --hard` while others are driving |
+| The morning traffic report | `six-ten watch` |
+| Inside the Loop | Inside `.git/six-ten/`: no server, no daemon |
 
 ## License
 
