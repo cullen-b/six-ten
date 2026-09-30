@@ -126,8 +126,10 @@ pub fn staged(root: &Path) -> Result<Vec<String>> {
 /// What a shell command would clobber in a shared checkout.
 #[derive(Debug, PartialEq)]
 pub enum Clobber {
-    /// Rewrites the whole working tree or switches branch for everyone.
+    /// Rewrites the whole working tree.
     Tree(String),
+    /// Creates or switches branches: every agent in the checkout would start committing elsewhere.
+    Branch(String),
     /// Overwrites or deletes specific paths (relative to the command's cwd).
     Paths(String, Vec<String>),
 }
@@ -240,7 +242,7 @@ pub fn clobbers(command: &str) -> Vec<Clobber> {
             "checkout" if !args.is_empty() => match after_dashdash {
                 Some(paths) => found.push(paths_or_tree(paths)),
                 None if positional.iter().any(|p| p == ".") => found.push(Clobber::Tree(label)),
-                None => found.push(Clobber::Tree(format!(
+                None => found.push(Clobber::Branch(format!(
                     "{label} (switches the branch for every agent)"
                 ))),
             },
@@ -258,7 +260,7 @@ pub fn clobbers(command: &str) -> Vec<Clobber> {
             "clean" if !args.iter().any(|a| matches!(*a, "-n" | "--dry-run")) => {
                 found.push(Clobber::Tree(label))
             }
-            "switch" => found.push(Clobber::Tree(format!(
+            "switch" => found.push(Clobber::Branch(format!(
                 "{label} (switches the branch for every agent)"
             ))),
             "rebase" | "pull" | "merge" | "am" | "revert" | "cherry-pick" => {
@@ -298,7 +300,11 @@ mod tests {
                 vec!["src/x.rs".into()]
             )]
         );
-        assert!(matches!(clobbers("git switch main")[0], Clobber::Tree(_)));
+        assert!(matches!(clobbers("git switch main")[0], Clobber::Branch(_)));
+        assert!(matches!(
+            clobbers("git checkout -b agents/x")[0],
+            Clobber::Branch(_)
+        ));
         assert!(matches!(clobbers("git clean -fd")[0], Clobber::Tree(_)));
     }
 

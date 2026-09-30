@@ -29,6 +29,17 @@ pub struct Touched {
     pub paths: BTreeSet<String>,
 }
 
+/// When an agent last ran a six-ten hook or tool in this repo.
+#[derive(Debug, Clone, Serialize, Deserialize, PartialEq)]
+pub struct Presence {
+    pub agent: String,
+    pub pid: Option<u32>,
+    pub at: u64,
+}
+
+/// How long an agent counts as active after its last hook or tool call.
+const ACTIVE_WINDOW: u64 = 30 * 60;
+
 #[derive(Debug, PartialEq)]
 pub enum Claim {
     Granted,
@@ -76,6 +87,39 @@ impl Store {
                 .with_context(|| format!("creating {}", dir.display()))?;
         }
         Ok(Store { root, dir })
+    }
+
+    /// Records that `agent` is working in this repo (rewritten at most every 30 seconds).
+    pub fn mark_present(&self, agent: &Agent) -> Result<()> {
+        let dir = self.dir.join("presence");
+        let file = dir.join(format!("{}.json", hex_sha(&agent.id)));
+        if read_json::<Presence>(&file).is_some_and(|p| now().saturating_sub(p.at) < 30) {
+            return Ok(());
+        }
+        fs::create_dir_all(&dir)?;
+        write_json(
+            &file,
+            &Presence {
+                agent: agent.id.clone(),
+                pid: agent.pid,
+                at: now(),
+            },
+        )
+    }
+
+    /// Other live agents that have been active here recently, most recent first.
+    pub fn active_others(&self, agent_id: &str) -> Result<Vec<Presence>> {
+        let Ok(entries) = fs::read_dir(self.dir.join("presence")) else {
+            return Ok(Vec::new());
+        };
+        let now = now();
+        let mut out: Vec<Presence> = entries
+            .filter_map(|e| read_json::<Presence>(&e.ok()?.path()))
+            .filter(|p| foreign(&p.agent, agent_id) && now.saturating_sub(p.at) <= ACTIVE_WINDOW)
+            .filter(|p| p.pid.is_none_or(pid_alive))
+            .collect();
+        out.sort_by_key(|p| std::cmp::Reverse(p.at));
+        Ok(out)
     }
 
     /// Remembers that `harness` runs six-ten hooks in this repo, so its MCP server can skip claims.

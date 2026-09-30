@@ -1300,3 +1300,43 @@ fn shared_files_wait_for_the_co_editor_and_carry_trailers() {
         "{msg}"
     );
 }
+
+#[test]
+fn branch_switches_wait_for_agents_that_have_not_edited_yet() {
+    let dir = repo();
+    assert_eq!(
+        hook(
+            &dir,
+            "alice",
+            "claude",
+            bash(&dir, "git switch -c agents/2026-09-29-a")
+        )
+        .status
+        .code(),
+        Some(0),
+        "alone: allowed"
+    );
+    // Bob has only started his turn: no leases, no edits.
+    hook(
+        &dir,
+        "bob",
+        "claude",
+        json!({"hook_event_name": "UserPromptSubmit", "cwd": dir, "prompt": "go"}),
+    );
+    let out = hook(
+        &dir,
+        "alice",
+        "claude",
+        bash(&dir, "git switch -c agents/2026-09-29-b"),
+    );
+    assert_eq!(out.status.code(), Some(2));
+    assert!(stderr(&out).contains("bob (active"), "{}", stderr(&out));
+    assert_eq!(
+        hook(&dir, "alice", "claude", bash(&dir, "git status"))
+            .status
+            .code(),
+        Some(0)
+    );
+    let status = String::from_utf8(six(&dir, "alice", &["status"]).stdout).unwrap();
+    assert!(status.contains("other agents active: bob"), "{status}");
+}

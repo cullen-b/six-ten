@@ -131,8 +131,9 @@ branch. six-ten changes the workflow to fit:
 
 - **Branch per session, not per feature.** Before the agents start, create a session branch such as
   `agents/2026-09-29-auth`. An agent can create it too, if it's on `main` and nobody else is active.
-  Every agent commits there. six-ten refuses branch switches while others are working, so nobody
-  pulls the floor out from under anyone.
+  Every agent commits there. six-ten refuses branch creation and switches while any other agent has
+  been active in the last 30 minutes, even one that hasn't edited anything yet, so nobody pulls the
+  floor out from under anyone. `six-ten status` lists the active agents.
 - **Commit early, per agent.** Each agent commits its own finished files as it goes. A commit that
   includes another agent's files is refused. A file two agents both edited waits until the other
   agent's turn ends, then commits with a `Co-edited-by:` trailer. Every agent commit gets an `Agent:`

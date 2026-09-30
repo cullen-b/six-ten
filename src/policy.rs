@@ -191,10 +191,19 @@ pub fn pre_shell(store: &Store, agent: &Agent, cwd: &Path, command: &str) -> Res
     let leases = store.others(&agent.id)?;
     let dirty = git::dirty(store.root(), &[])?;
     let touched = store.touched_by_others(&agent.id, &dirty)?;
+    let active = store.active_others(&agent.id)?;
     let mut hits: Vec<(String, String)> = Vec::new();
     for clobber in &clobbers {
         let (label, affected): (&str, Option<HashSet<String>>) = match clobber {
             Clobber::Tree(label) => (label, None),
+            Clobber::Branch(label) => {
+                // Even an agent that hasn't edited yet would find itself on another branch.
+                for p in &active {
+                    let ago = human(now().saturating_sub(p.at));
+                    hits.push((label.clone(), format!("{} (active {ago} ago)", p.agent)));
+                }
+                (label, None)
+            }
             Clobber::Paths(label, raw) => (label, Some(normalize_prefixes(store, cwd, raw))),
         };
         let hit = |p: &str| {

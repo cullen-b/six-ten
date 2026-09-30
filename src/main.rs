@@ -187,6 +187,22 @@ fn run(command: Command) -> Result<u8> {
 pub fn status_text(store: &Store, me: &Agent) -> Result<String> {
     let now = now();
     let mut out = format!("you are {}\n", me.id);
+    let active = store.active_others(&me.id)?;
+    if active.is_empty() {
+        out.push_str("no other agents active\n");
+    } else {
+        let list: Vec<String> = active
+            .iter()
+            .map(|p| {
+                format!(
+                    "{} ({} ago)",
+                    p.agent,
+                    policy::human(now.saturating_sub(p.at))
+                )
+            })
+            .collect();
+        out.push_str(&format!("other agents active: {}\n", list.join(", ")));
+    }
     let leases = store.live()?;
     if leases.is_empty() {
         out.push_str("no files are being edited\n");

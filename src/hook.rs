@@ -102,6 +102,7 @@ pub fn handle(harness: &str, payload: &Value) -> Result<Decision> {
         None => base,
     };
     // After a tool call, pass on news right away; Hermes cannot annotate a finished call.
+    store.mark_present(&agent)?;
     let done = |r: Result<()>| {
         r?;
         if harness == "hermes" {

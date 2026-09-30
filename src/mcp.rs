@@ -88,6 +88,7 @@ fn respond(cwd: &Path, agent: &Agent, msg: &Value) -> Result<Value, (i64, String
 
 fn call(cwd: &Path, agent: &Agent, name: &str, args: &Value) -> Result<(String, bool)> {
     let store = Store::open(cwd)?;
+    store.mark_present(agent)?;
     let paths: Vec<String> = args["paths"]
         .as_array()
         .map(|a| {
