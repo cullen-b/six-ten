@@ -47,11 +47,22 @@ pub fn pre_edit(
     cwd: &Path,
     raw_paths: &[String],
 ) -> Result<Decision> {
+    pre_edit_with_reason(store, agent, cwd, raw_paths, None)
+}
+
+/// Claims `raw_paths`, attaching `reason` so blocked agents see why the files are held.
+pub fn pre_edit_with_reason(
+    store: &Store,
+    agent: &Agent,
+    cwd: &Path,
+    raw_paths: &[String],
+    reason: Option<&str>,
+) -> Result<Decision> {
     let paths = normalize_all(store, cwd, raw_paths);
     if paths.is_empty() {
         return Ok(Decision::Allow);
     }
-    match store.claim(agent, &paths, ttl())? {
+    match store.claim_with_reason(agent, &paths, ttl(), reason)? {
         Claim::Granted => {
             store.note_granted(&agent.id, &paths)?;
             let dirty = git::dirty(store.root(), &paths)?;
@@ -427,11 +438,15 @@ pub fn conflict_message(leases: &[Lease]) -> String {
     let held: Vec<String> = leases
         .iter()
         .map(|l| {
+            let why = l
+                .reason
+                .as_deref()
+                .map_or(String::new(), |r| format!(": {r}"));
             format!(
-                "`{}` is being edited by {} (lease expires in {})",
+                "`{}` is being edited by {} (lease expires in {}){why}",
                 l.path,
                 l.agent,
-                human(l.expires_at.saturating_sub(now))
+                human(l.expires_at.saturating_sub(now)),
             )
         })
         .collect();

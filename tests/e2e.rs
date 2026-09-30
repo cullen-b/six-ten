@@ -127,6 +127,50 @@ fn second_agent_is_blocked_until_release() {
 }
 
 #[test]
+fn claim_reason_is_shown_to_blocked_agents() {
+    let dir = repo();
+    assert_eq!(
+        six(&dir, "alice", &["claim", "src/a.rs", "-m", "JWT migration"]).status.code(),
+        Some(0)
+    );
+    let blocked = six(&dir, "bob", &["claim", "src/a.rs"]);
+    assert_eq!(blocked.status.code(), Some(2));
+    assert!(
+        stderr(&blocked).contains("JWT migration"),
+        "{}",
+        stderr(&blocked)
+    );
+    let status = String::from_utf8(six(&dir, "carol", &["status"]).stdout).unwrap();
+    assert!(status.contains("JWT migration"), "{status}");
+    // Claims without a reason still work and old leases stay readable.
+    assert_eq!(
+        six(&dir, "alice", &["claim", "src/b.rs"]).status.code(),
+        Some(0)
+    );
+    let blocked = six(&dir, "bob", &["claim", "src/b.rs"]);
+    assert_eq!(blocked.status.code(), Some(2));
+    assert!(
+        stderr(&blocked).contains("`src/b.rs` is being edited by alice"),
+        "{}",
+        stderr(&blocked)
+    );
+}
+
+#[test]
+fn decide_records_an_event_visible_in_status() {
+    let dir = repo();
+    let out = six(&dir, "alice", &["decide", "Chose", "JWT", "over", "sessions"]);
+    assert_eq!(out.status.code(), Some(0));
+    let status = String::from_utf8(six(&dir, "bob", &["status"]).stdout).unwrap();
+    assert!(status.contains("Chose JWT over sessions"), "{status}");
+    assert_eq!(
+        six(&dir, "alice", &["decide"]).status.code(),
+        Some(1),
+        "empty decisions are rejected"
+    );
+}
+
+#[test]
 fn concurrent_claims_have_exactly_one_winner() {
     let dir = repo();
     let children: Vec<_> = (0..16)
@@ -386,7 +430,7 @@ fn mcp_server_speaks_json_rpc() {
         .collect();
     assert_eq!(replies.len(), 5, "notification gets no reply");
     assert_eq!(replies[0]["result"]["serverInfo"]["name"], "six-ten");
-    assert_eq!(replies[1]["result"]["tools"].as_array().unwrap().len(), 4);
+    assert_eq!(replies[1]["result"]["tools"].as_array().unwrap().len(), 5);
     assert_eq!(replies[2]["result"]["isError"], true);
     assert!(
         replies[2]["result"]["content"][0]["text"]
@@ -1038,7 +1082,12 @@ fn mcp_drops_claim_for_harnesses_whose_hooks_claim_edits() {
     let after = mcp_session(&dir, "cursor:2");
     assert_eq!(
         names(&after[1]),
-        ["six_ten_wait", "six_ten_release", "six_ten_status"]
+        [
+            "six_ten_wait",
+            "six_ten_release",
+            "six_ten_status",
+            "six_ten_decide"
+        ]
     );
     assert!(
         after[0]["result"]["instructions"]
@@ -1190,7 +1239,7 @@ fn global_install_keeps_existing_user_config() {
     )
     .unwrap();
     let reply: Value = serde_json::from_slice(&child.wait_with_output().unwrap().stdout).unwrap();
-    assert_eq!(reply["result"]["tools"].as_array().unwrap().len(), 3);
+    assert_eq!(reply["result"]["tools"].as_array().unwrap().len(), 4);
 }
 
 #[test]

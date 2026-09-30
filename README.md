@@ -42,7 +42,8 @@ Separate worktrees avoid all of this by giving up on sharing a checkout. six-ten
 
 | | |
 |---|---|
-| **File leases** | The first agent to edit a file holds it. Others are refused with the holder's name, and are told to work on other files or call `six_ten_wait`. Races have exactly one winner. |
+| **File leases** | The first agent to edit a file holds it. Others are refused with the holder's name, and are told to work on other files or call `six_ten_wait`. Races have exactly one winner. Claim with `-m "<reason>"` so blocked agents see the why. |
+| **Decisions** | `six-ten decide "<text>"` records a decision (and `six_ten_decide` from any agent) in the event feed, so it outlives the chat session. |
 | **Change notes** | When another agent changes a file you've read, you get a compact diff once: after your next tool call, at your next turn, or in your `six_ten_wait` result. |
 | **Stale-write stop** | About to write a file that changed since you read it? That write is refused once with the diff, and you keep the lease while you re-read. The retry goes through. |
 | **Shell coverage** | `sed -i`, `perl -pi`, `>`/`>>`, `tee`, `mv`, `cp`, `rm` and `apply_patch` heredocs count as edits, so a refusal can't be dodged through the shell. |
@@ -289,6 +290,8 @@ six-ten session [topic]          start (or reuse) this checkout's agents/<date>-
 six-ten watch [--history N]      live event feed
 six-ten notify [on|off]          desktop notifications for this repo (off by default)
 six-ten claim <paths>            claim manually; exit 2 with the reason if another agent holds any of them
+six-ten claim <paths> -m "<why>"  claim with a reason blocked agents can see
+six-ten decide "<text>"          record a decision in the event feed
 six-ten wait <paths> [--timeout S]
 six-ten release [paths]          release yours (all of them if no paths are given)
 six-ten whoami | gc              show your agent id | prune stale state older than a day

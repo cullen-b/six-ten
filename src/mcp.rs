@@ -100,7 +100,13 @@ fn call(cwd: &Path, agent: &Agent, name: &str, args: &Value) -> Result<(String, 
     Ok(match name {
         "six_ten_status" => (crate::status_text(&store, agent)?, true),
         "six_ten_claim" => reply(
-            policy::pre_edit(&store, agent, cwd, &paths)?,
+            policy::pre_edit_with_reason(
+                &store,
+                agent,
+                cwd,
+                &paths,
+                args["reason"].as_str(),
+            )?,
             format!("claimed: {}", paths.join(", ")),
         ),
         "six_ten_wait" => {
@@ -110,8 +116,7 @@ fn call(cwd: &Path, agent: &Agent, name: &str, args: &Value) -> Result<(String, 
                 format!("free and claimed for you: {}", paths.join(", ")),
             )
         }
-        "six_ten_release" => {
-            let only = (!paths.is_empty()).then(|| {
+        "six_ten_release" => {            let only = (!paths.is_empty()).then(|| {
                 paths
                     .iter()
                     .filter_map(|p| store.normalize(cwd, p))
@@ -126,6 +131,17 @@ fn call(cwd: &Path, agent: &Agent, name: &str, args: &Value) -> Result<(String, 
                 ),
                 true,
             )
+        }
+        "six_ten_decide" => {
+            let text = args["text"].as_str().unwrap_or_default().trim().to_string();
+            if text.is_empty() {
+                ("give the decision to record".to_string(), false)
+            } else {
+                match store.log(&agent.id, "decision", text.clone()) {
+                    Ok(()) => (format!("recorded decision: {text}"), true),
+                    Err(e) => (format!("six-ten error: {e:#}"), false),
+                }
+            }
         }
         other => (format!("unknown tool {other}"), false),
     })
@@ -156,12 +172,17 @@ fn tools(hooked: bool) -> Value {
             "description": "Who is editing what. Useful for choosing what to work on; never needed before an edit.",
             "inputSchema": {"type": "object", "properties": {}},
         }),
+        json!({
+            "name": "six_ten_decide",
+            "description": "Record a decision (e.g. why approach X beat Y) so it outlives the chat session. Shown in status and watch.",
+            "inputSchema": {"type": "object", "properties": {"text": {"type": "string", "description": "The decision to record"}}, "required": ["text"]},
+        }),
     ];
     if !hooked {
         tools.insert(0, json!({
             "name": "six_ten_claim",
             "description": "Claim files right before editing them. Fails, naming the holder, if another agent is editing any of them; then work on other files.",
-            "inputSchema": {"type": "object", "properties": {"paths": paths}, "required": ["paths"]},
+            "inputSchema": {"type": "object", "properties": {"paths": paths, "reason": {"type": "string", "description": "Why you are editing; shown to agents you block"}}, "required": ["paths"]},
         }));
     }
     Value::Array(tools)

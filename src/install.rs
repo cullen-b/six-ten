@@ -17,6 +17,8 @@ Several agents may share this checkout; six-ten keeps you from colliding.
 
 - Just edit. Edits are claimed automatically; claim files first only if `six_ten_claim` is in your
   tool list.
+- Say why when you claim (`six-ten claim <path> -m 'reason'`): blocked agents see it and can
+  coordinate instead of guessing. Record lasting decisions with `six-ten decide 'text'`.
 - If an edit is refused because another agent holds the file, work on other files and retry later.
   Call `six_ten_wait` only when nothing else is left. Never get around a refusal with the shell.
 - Notes from six-ten are diffs of other agents' changes: account for them; re-read only when told to.

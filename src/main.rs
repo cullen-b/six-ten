@@ -30,7 +30,12 @@ struct Cli {
 #[derive(Subcommand)]
 enum Command {
     /// Claim files before editing them; exits 2 if another agent holds any of them.
-    Claim { paths: Vec<String> },
+    Claim {
+        paths: Vec<String>,
+        /// Why you are editing; shown to agents you block so they can coordinate.
+        #[arg(long, short = 'm')]
+        reason: Option<String>,
+    },
     /// Block until files are free, then claim them.
     Wait {
         paths: Vec<String>,
@@ -41,6 +46,8 @@ enum Command {
     Release { paths: Vec<String> },
     /// Put this checkout on a session branch (agents/<date>-<topic>), or report the one in use.
     Session { topic: Option<String> },
+    /// Record a decision so it outlives the chat session; shown in status and watch.
+    Decide { text: Vec<String> },
     /// Show who is editing what.
     Status,
     /// Print the agent id six-ten sees for the calling process.
@@ -114,8 +121,14 @@ fn run(command: Command) -> Result<u8> {
             let store = Store::open(&cwd)?;
             let agent = Agent::current();
             match command {
-                Command::Claim { paths } => Ok(decided(
-                    policy::pre_edit(&store, &agent, &cwd, &paths)?,
+                Command::Claim { paths, reason } => Ok(decided(
+                    policy::pre_edit_with_reason(
+                        &store,
+                        &agent,
+                        &cwd,
+                        &paths,
+                        reason.as_deref(),
+                    )?,
                     format!("claimed {}", paths.join(" ")),
                 )),
                 Command::Wait { paths, timeout } => {
@@ -136,6 +149,13 @@ fn run(command: Command) -> Result<u8> {
                 }
                 Command::Session { topic } => {
                     println!("{}", policy::session(&store, &agent, topic.as_deref())?);
+                    Ok(0)
+                }
+                Command::Decide { text } => {
+                    let text = text.join(" ");
+                    anyhow::ensure!(!text.is_empty(), "give the decision to record");
+                    store.log(&agent.id, "decision", text.clone())?;
+                    println!("recorded decision: {text}");
                     Ok(0)
                 }
                 Command::Status => {
@@ -220,8 +240,12 @@ pub fn status_text(store: &Store, me: &Agent) -> Result<String> {
             } else {
                 format!("{} (you)", l.agent)
             };
+            let why = l
+                .reason
+                .as_deref()
+                .map_or(String::new(), |r| format!(": {r}"));
             out.push_str(&format!(
-                "  {}  {}  expires in {}\n",
+                "  {}  {}  expires in {}{why}\n",
                 l.path,
                 who,
                 policy::human(l.expires_at.saturating_sub(now))

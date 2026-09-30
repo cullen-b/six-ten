@@ -19,6 +19,9 @@ pub struct Lease {
     pub pid: Option<u32>,
     pub acquired_at: u64,
     pub expires_at: u64,
+    /// Why the holder is editing; shown to blocked agents so they can coordinate.
+    #[serde(default)]
+    pub reason: Option<String>,
 }
 
 /// Files an agent has edited; kept past its leases so its uncommitted work stays attributable.
@@ -150,6 +153,17 @@ impl Store {
     }
 
     pub fn claim(&self, agent: &Agent, paths: &[String], ttl: u64) -> Result<Claim> {
+        self.claim_with_reason(agent, paths, ttl, None)
+    }
+
+    /// Claims paths, attaching `reason` to new leases so blocked agents see the why.
+    pub fn claim_with_reason(
+        &self,
+        agent: &Agent,
+        paths: &[String],
+        ttl: u64,
+        reason: Option<&str>,
+    ) -> Result<Claim> {
         self.locked(|| {
             let now = now();
             let current: Vec<(String, Option<Lease>)> =
@@ -163,15 +177,18 @@ impl Store {
                 return Ok(Claim::Conflict(conflicts));
             }
             for (path, existing) in current {
-                let acquired_at = existing
-                    .filter(|l| l.agent == agent.id)
-                    .map_or(now, |l| l.acquired_at);
+                let same = existing.as_ref().filter(|l| l.agent == agent.id);
+                let acquired_at = same.map_or(now, |l| l.acquired_at);
+                let reason = reason
+                    .map(String::from)
+                    .or_else(|| same.and_then(|l| l.reason.clone()));
                 let lease = Lease {
                     path,
                     agent: agent.id.clone(),
                     pid: agent.pid,
                     acquired_at,
                     expires_at: now + ttl,
+                    reason,
                 };
                 self.write(&lease)?;
             }

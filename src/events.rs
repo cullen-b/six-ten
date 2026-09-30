@@ -51,7 +51,15 @@ impl Store {
             self.log(
                 agent_id,
                 "blocked",
-                format!("blocked on {} (held by {})", lease.path, lease.agent),
+                format!(
+                    "blocked on {} (held by {}{})",
+                    lease.path,
+                    lease.agent,
+                    lease
+                        .reason
+                        .as_deref()
+                        .map_or(String::new(), |r| format!(": {r}"))
+                ),
             )?;
         }
         Ok(())
@@ -239,6 +247,7 @@ pub fn icon(kind: &str) -> &'static str {
         "stale" => "🔄",
         "refused" => "⛔",
         "session" => "🛣️",
+        "decision" => "📝",
         _ => "⚠️",
     }
 }
