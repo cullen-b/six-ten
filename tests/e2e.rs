@@ -1192,3 +1192,36 @@ fn global_install_keeps_existing_user_config() {
     let reply: Value = serde_json::from_slice(&child.wait_with_output().unwrap().stdout).unwrap();
     assert_eq!(reply["result"]["tools"].as_array().unwrap().len(), 3);
 }
+
+#[test]
+fn commit_guard_installs_itself_without_setup() {
+    let dir = repo();
+    let hook_file = dir.join(".git/hooks/pre-commit");
+    fs::write(&hook_file, "#!/bin/sh\necho existing-hook\n").unwrap();
+    assert_eq!(
+        hook(&dir, "alice", "claude", edit(&dir, "src/a.rs"))
+            .status
+            .code(),
+        Some(0)
+    );
+    let body = fs::read_to_string(&hook_file).unwrap();
+    assert!(
+        body.contains("six-ten precommit || exit 1") && body.contains("echo existing-hook"),
+        "{body}"
+    );
+    hook(&dir, "alice", "claude", edit(&dir, "src/a.rs"));
+    assert_eq!(
+        fs::read_to_string(&hook_file)
+            .unwrap()
+            .matches("six-ten precommit")
+            .count(),
+        1
+    );
+
+    // Hooks kept in tracked files (Husky-style core.hooksPath) are the project's: leave them alone.
+    let husky = repo();
+    fs::create_dir_all(husky.join(".husky")).unwrap();
+    git(&husky, &["config", "core.hooksPath", ".husky"]);
+    hook(&husky, "alice", "claude", edit(&husky, "src/a.rs"));
+    assert!(!husky.join(".husky/pre-commit").exists());
+}

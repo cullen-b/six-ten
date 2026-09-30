@@ -1,0 +1,73 @@
+SIX-TEN INSTALL GUIDE FOR AGENTS
+================================
+
+You are installing six-ten, a tool that lets several coding agents (Claude Code, Codex, OpenCode,
+Hermes, ...) work in one git checkout without clobbering each other. Follow these steps in order.
+Ask the user before step 3, and report back at the end. Don't skip the backup.
+
+1. CHECK PREREQUISITES
+   - OS must be macOS or Linux.
+   - `git --version` must work.
+   - `cargo --version` must work, with Rust 1.85 or newer. If Rust is missing, ask the user whether to
+     install it (https://rustup.rs). Don't install it without asking.
+   - Find the installed harnesses: `command -v claude codex opencode hermes`.
+
+2. INSTALL THE BINARY
+     cargo install --locked --git https://github.com/cullen-b/six-ten
+     six-ten --version
+   `six-ten` must be on PATH for every harness. Cargo installs to ~/.cargo/bin; if that directory
+   isn't on PATH, tell the user.
+
+3. ASK THE USER WHICH SCOPE
+   - Machine-wide (recommended): covers every repo for every installed harness.
+       six-ten install all --global
+   - One repo only: run this inside the repo, then commit the generated files.
+       six-ten install all
+   Don't do both for the same harness; the hooks would run twice.
+
+4. BACK UP FIRST (machine-wide only). Copy each of these that exists into ~/.six-ten-backup/<timestamp>/:
+     ~/.claude/settings.json  ~/.claude/CLAUDE.md  ~/.claude.json
+     ~/.codex/config.toml  ~/.codex/hooks.json  ~/.codex/AGENTS.md
+     ~/.config/opencode/opencode.json(c)  ~/.config/opencode/AGENTS.md  ~/.hermes/config.yaml
+   The installer keeps existing hooks, settings and JSONC comments, but a backup makes undoing trivial.
+
+5. RUN THE INSTALL AND READ ITS OUTPUT
+   Every line tells you what it wrote. A line starting with "finish with:" is a command that couldn't
+   run automatically; run it, or pass it on to the user.
+
+6. VERIFY
+     claude mcp list      # six-ten ... Connected
+     codex mcp list       # six-ten ... enabled
+     opencode mcp list    # six-ten connected
+     hermes mcp list      # six-ten ... enabled
+   Then run a lease smoke test inside any git repo; the second claim must fail with exit code 2:
+     SIX_TEN_AGENT=a six-ten claim README.md && SIX_TEN_AGENT=b six-ten claim README.md; echo "exit $?"
+     SIX_TEN_AGENT=a six-ten release
+
+7. TELL THE USER THE STEPS ONLY THEY CAN DO
+   - Codex: start `codex` and run `/hooks` once to approve the six-ten hooks. Until then, Codex skips
+     them. For a per-repo install, also trust the project.
+   - Claude Code, per-repo install only: open the repo interactively once and accept the trust prompt.
+   - Nothing for git: the commit guard installs itself in each repo the first time an agent works
+     there.
+   - Optional: `six-ten watch` gives a live feed, and `six-ten notify on` turns on desktop
+     notifications.
+
+8. OFFER TO UPDATE THEIR AGENT INSTRUCTIONS (never edit them without asking)
+   Look in ~/.claude/CLAUDE.md, ~/.codex/AGENTS.md, ~/.config/opencode/AGENTS.md, ~/.hermes/AGENTS.md
+   and the repos' own AGENTS.md / CLAUDE.md for rules that conflict with a shared checkout:
+   - "one worktree / clone / branch per agent": agents now share one checkout and one branch.
+   - Creating or switching branches mid-session (`git checkout -b`, `git switch`): six-ten refuses
+     these while other agents are active.
+   - Cleanup that discards everything (`git restore .`, `git checkout .`, `git stash`,
+     `git reset --hard`, `git clean`): this destroys other agents' work. Replace it with discarding
+     only the agent's own files, by path.
+   - `git add -A` / `git commit -a`: agents must stage their own paths only.
+   Show the user the proposed changes and apply them only once they agree. The README's "Workflow"
+   section describes the recommended rules.
+
+UNINSTALL: restore the backed-up files; delete ~/.config/opencode/plugins/six-ten.ts and
+~/.hermes/plugins/six-ten/; run `claude mcp remove six-ten` and `hermes mcp remove six-ten`; remove
+~/.config/six-ten/.
+
+Full docs: https://github.com/cullen-b/six-ten

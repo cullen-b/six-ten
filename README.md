@@ -52,28 +52,56 @@ Separate worktrees avoid all of this by giving up on sharing a checkout. six-ten
 
 ## Quick start
 
+### Let your agent install it
+
+Paste this into Claude Code, Codex, OpenCode or Hermes:
+
+> Install six-ten for me by following https://raw.githubusercontent.com/cullen-b/six-ten/main/AGENTS.txt
+
+[`AGENTS.txt`](AGENTS.txt) walks the agent through it: check prerequisites, build, ask you whether to
+install machine-wide or for one repo, back up your configs, install, verify, and list the steps only
+you can do. It also offers to update your agent instructions for a shared checkout.
+
+### Or do it yourself
+
 Requirements: macOS or Linux, git, and Rust 1.85 or newer (to build).
 
 ```sh
-cargo install --git https://github.com/cullen-b/six-ten   # or: git clone … && cargo install --path .
-cd your-repo
-six-ten install all      # or pick harnesses: claude | codex | opencode | hermes | generic | git
-git add -A && git commit -m "Add six-ten"
+cargo install --locked --git https://github.com/cullen-b/six-ten
+six-ten install all --global     # every repo on this machine, for every harness
 ```
 
-Or install once for every repo on your machine. This writes each harness's user-level config
-(`~/.claude`, `~/.codex`, `~/.config/opencode`, `~/.hermes`) and keeps your existing hooks and
-settings:
+This writes each harness's user-level config (`~/.claude`, `~/.codex`, `~/.config/opencode`,
+`~/.hermes`). It keeps your existing hooks, settings and JSONC comments, and running it again changes
+nothing. Back up those files first if you'd like a one-step undo.
 
-```sh
-six-ten install all --global      # then, per repo, optionally: six-ten install git
-```
+For a single repo instead, run `six-ten install all` inside it and commit the generated files. Pick one
+scope per harness; installing both makes each hook run twice.
+
+The git commit guard installs itself: the first time an agent works in a repo, six-ten adds its check
+to that repo's `pre-commit` hook, alongside any hook you already have. Repos that keep their hooks in
+tracked files (Husky-style `core.hooksPath`) are left alone.
+
+**The only steps left are the harnesses' own security prompts, which six-ten won't bypass:**
+
+- **Codex:** start `codex` and run `/hooks` once to approve the six-ten hooks. Until then Codex skips
+  them.
+- **Claude Code, per-repo installs only:** open the repo interactively once and accept the trust
+  prompt, or Claude Code ignores the project's permissions. Machine-wide installs don't need this.
 
 Then start your agents as usual. There's nothing to run in the background.
 
 ```sh
-six-ten watch            # optional: live feed of what agents are doing
+six-ten watch            # live feed of what agents are doing
 six-ten status           # who is editing what, uncommitted work, recent events
+```
+
+### Check that it works
+
+```sh
+claude mcp list; codex mcp list; opencode mcp list; hermes mcp list   # six-ten connected / enabled
+SIX_TEN_AGENT=a six-ten claim README.md && SIX_TEN_AGENT=b six-ten claim README.md; echo "exit $?"   # exit 2
+SIX_TEN_AGENT=a six-ten release
 ```
 
 ## Supported harnesses
@@ -85,7 +113,7 @@ six-ten status           # who is editing what, uncommitted work, recent events
 | **OpenCode** | Plugin (blocking) | `.opencode/plugins/six-ten.ts`, MCP in `opencode.json`, `AGENTS.md` section | None |
 | **Hermes** | Plugin (blocking) | Plugin in `~/.hermes/plugins/six-ten` (or `$HERMES_HOME`), enabled and MCP-registered through the `hermes` CLI | None. The plugin is global and does nothing outside git repos |
 | **Anything with MCP** | Advisory | `six-ten install generic`: `AGENTS.md` section and pre-commit check; register `six-ten mcp` yourself | See [Adding a harness](#adding-a-harness) |
-| **git** | Commit-time | `pre-commit` hook running `six-ten precommit` | Installed by `all`. It's the backstop for every harness |
+| **git** | Commit-time | `pre-commit` hook running `six-ten precommit` | None: it installs itself in each repo the first time an agent works there. It's the backstop for every harness |
 
 Verified live with Claude Code 2.1.285, Codex 0.159, OpenCode 1.18 and Hermes 0.21, including all of
 them running at once against one file.
@@ -158,6 +186,24 @@ Measured, at roughly 4 characters per token:
 Without collisions, the whole cost is a few hundred cached tokens per session. When agents do
 collide, a 60-token diff replaces re-reading a whole file, redoing clobbered work, or debugging a
 broken merge.
+
+## Troubleshooting
+
+| Symptom | Cause and fix |
+|---|---|
+| Codex edits aren't blocked | Its hooks aren't approved yet: run `/hooks` in Codex. A per-repo install also needs the project trusted |
+| Codex can't commit (`.git/index.lock: Operation not permitted`) | The `six-ten` sandbox profile isn't active. If you set your own `default_permissions`, add the three `.git` rules the installer printed to that profile |
+| Headless Claude (`claude -p`) can't call `six_ten_wait` | The workspace isn't trusted, so project permissions are ignored. Open it interactively once, or use `--global` |
+| Hooks never fire | `six-ten` isn't on PATH for that app. Apps started from a GUI may not see `~/.cargo/bin` |
+| An agent shows up as `python3:…` or `node:…` | Its launcher hides the harness name. Set `SIX_TEN_AGENT` for a stable id |
+| A lease is stuck | Leases expire after 10 idle minutes, and dead processes don't hold leases. `six-ten status` shows who holds what; `six-ten gc` cleans up |
+
+## Uninstall
+
+Restore your config backups (or delete the `six-ten` entries). Then delete
+`~/.config/opencode/plugins/six-ten.ts`, `~/.hermes/plugins/six-ten/` and `~/.config/six-ten/`, and run
+`claude mcp remove six-ten` and `hermes mcp remove six-ten`. In a repo, `.git/six-ten/` holds all of
+six-ten's state and is safe to delete.
 
 ## Adding a harness
 

@@ -79,8 +79,11 @@ pub fn run(harness: &str, repo: &Path, global: bool) -> Result<()> {
             "codex" => codex(&scope)?,
             "opencode" => opencode(&scope)?,
             "hermes" => hermes(&scope)?,
-            "git" | "generic" if global => println!(
-                "{name}: per-repository only; run `{BIN} install {name}` inside each repo that wants it"
+            "git" if global => println!(
+                "git: automatic; each repo gets the pre-commit check the first time an agent works in it"
+            ),
+            "generic" if global => println!(
+                "generic: per-repository only; run `{BIN} install generic` inside the repo"
             ),
             "git" => git_hook(repo_root(&scope))?,
             "generic" => {
@@ -449,10 +452,56 @@ fn merge_hooks<const N: usize>(hooks: &mut Value, wanted: [(&str, Value); N]) ->
     Ok(())
 }
 
+const PRECOMMIT_LINE: &str = "six-ten precommit || exit 1";
+
 fn git_hook(root: &Path) -> Result<()> {
+    let hook = write_git_hook(&pre_commit_path(root)?)?;
+    println!("git: pre-commit check in {}", hook.display());
+    Ok(())
+}
+
+fn pre_commit_path(root: &Path) -> Result<PathBuf> {
     let hook = git_out(root, &["rev-parse", "--git-path", "hooks/pre-commit"])?;
-    let hook = root.join(hook.trim());
-    let line = format!("{BIN} precommit || exit 1");
+    Ok(root.join(hook.trim()))
+}
+
+/// Runs on every harness hook: gives the repo the commit guard without any setup. Hooks kept in
+/// the working tree (`core.hooksPath`, e.g. Husky) are the project's own files, so those are left alone.
+pub fn ensure_git_hook(store: &crate::store::Store) -> Result<()> {
+    let flag = store.dir.join("git-hook");
+    if let Ok(recorded) = fs::read_to_string(&flag) {
+        let recorded = recorded.trim();
+        if recorded == "skip"
+            || fs::read_to_string(recorded).is_ok_and(|b| b.contains(PRECOMMIT_LINE))
+        {
+            return Ok(());
+        }
+    }
+    let root = store.root();
+    let hook = pre_commit_path(root)?;
+    let git_dir = PathBuf::from(
+        git_out(
+            root,
+            &["rev-parse", "--path-format=absolute", "--git-common-dir"],
+        )?
+        .trim(),
+    );
+    let hook_dir = hook.parent().context("hook path has no parent")?;
+    fs::create_dir_all(hook_dir).ok();
+    let inside_git = hook_dir
+        .canonicalize()
+        .is_ok_and(|d| git_dir.canonicalize().is_ok_and(|g| d.starts_with(g)));
+    if !inside_git {
+        return fs::write(&flag, "skip").map_err(Into::into);
+    }
+    let hook = write_git_hook(&hook)?;
+    fs::write(&flag, hook.to_string_lossy().as_bytes())?;
+    Ok(())
+}
+
+fn write_git_hook(hook: &Path) -> Result<PathBuf> {
+    let hook = hook.to_path_buf();
+    let line = PRECOMMIT_LINE.to_string();
     let existing = fs::read_to_string(&hook).unwrap_or_default();
     let body = if existing.contains(&line) {
         existing
@@ -473,8 +522,7 @@ fn git_hook(root: &Path) -> Result<()> {
         use std::os::unix::fs::PermissionsExt;
         fs::set_permissions(&hook, fs::Permissions::from_mode(0o755))?;
     }
-    println!("git: pre-commit check in {}", hook.display());
-    Ok(())
+    Ok(hook)
 }
 
 /// Inserts or replaces the protocol section between six-ten markers.
