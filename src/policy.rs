@@ -253,7 +253,13 @@ pub fn pre_commit(store: &Store, agent: &Agent) -> Result<Decision> {
         .others(&agent.id)?
         .into_iter()
         .filter(|l| staged.contains(&l.path))
-        .map(|l| format!("{} (being edited by {})", l.path, l.agent))
+        .map(|l| {
+            if mine.contains(&l.path) {
+                format!("{} (you both edited it; {} is still working, so commit it after its turn ends)", l.path, l.agent)
+            } else {
+                format!("{} (being edited by {})", l.path, l.agent)
+            }
+        })
         .collect();
     for t in store.touched_by_others(&agent.id, &staged)? {
         hits.extend(
@@ -282,10 +288,28 @@ pub fn pre_commit(store: &Store, agent: &Agent) -> Result<Decision> {
         format!("commit refused, it included: {}", hits.join(", ")),
     )?;
     Ok(Decision::Deny(format!(
-        "six-ten: commit blocked, it includes other agents' work:\n  {}\nUnstage them (`git restore --staged <path>`) \
-         and commit only the files you changed. If they belong in this commit, ask the user.",
+        "six-ten: commit blocked, it includes other agents' work:\n  {}\nUnstage those (`git restore --staged <path>`) \
+         and commit the rest of your files now. If they belong in this commit, ask the user.",
         hits.join("\n  ")
     )))
+}
+
+/// Trailers for a commit by `agent`: who made it, and who else edited its files.
+pub fn commit_trailers(store: &Store, agent: &Agent) -> Result<Vec<String>> {
+    let mut out = Vec::new();
+    // Only agents get an `Agent:` trailer; a human's shell isn't a hooked harness.
+    if store.is_hooked(crate::store::harness_of(&agent.id)) {
+        out.push(format!("Agent: {}", agent.id));
+    }
+    let staged: HashSet<String> = git::staged(store.root())?.into_iter().collect();
+    let mine = store.touched_by(&agent.id)?;
+    for t in store.touched_by_others(&agent.id, &staged)? {
+        if t.paths.iter().any(|p| mine.contains(p)) {
+            out.push(format!("Co-edited-by: {}", t.agent));
+        }
+    }
+    out.dedup();
+    Ok(out)
 }
 
 /// Releases everything held by `agent` (and its subagents).

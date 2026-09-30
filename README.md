@@ -124,6 +124,35 @@ Writing either of those would let an agent run code outside the sandbox. If you 
 `default_permissions`, the installer leaves it alone and prints the three rules to add to your
 profile.
 
+## Workflow
+
+A checkout can only have one branch checked out, so agents sharing one can't each have a feature
+branch. six-ten changes the workflow to fit:
+
+- **Branch per session, not per feature.** Before the agents start, create a session branch such as
+  `agents/2026-09-29-auth`. An agent can create it too, if it's on `main` and nobody else is active.
+  Every agent commits there. six-ten refuses branch switches while others are working, so nobody
+  pulls the floor out from under anyone.
+- **Commit early, per agent.** Each agent commits its own finished files as it goes. A commit that
+  includes another agent's files is refused. A file two agents both edited waits until the other
+  agent's turn ends, then commits with a `Co-edited-by:` trailer. Every agent commit gets an `Agent:`
+  trailer automatically, so history stays attributable and each piece can be reverted on its own.
+- **One PR at the end.** The session branch goes into `main` through a single PR, and the PR
+  description is the session summary. To see who did what:
+
+  ```sh
+  git log main.. --format='%h %s  [%(trailers:key=Agent,valueonly,separator=%x2C)]'
+  ```
+- **Other agents' work in progress is visible.** A test can fail in a file another agent is halfway
+  through. `six-ten status` shows which files those are, and agents are told they aren't theirs to
+  fix.
+- **Worktrees still have a place.** Use them for long-running or experimental work that shouldn't
+  share a session branch. Leases are shared across the worktrees of one repo, so agents in different
+  worktrees still won't edit the same path at once.
+
+These rules are part of the protocol section that `six-ten install` adds to your agents'
+instructions (`CLAUDE.md`, `AGENTS.md`).
+
 ## What agents see
 
 When the file is held by another agent:

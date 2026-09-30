@@ -13,16 +13,23 @@ const GIT_RULES: &str = "[permissions.six-ten.filesystem.\":workspace_roots\"]\n
 
 const PROTOCOL: &str = "## Working alongside other agents (six-ten)
 
-Several agents may be editing this checkout at the same time; six-ten keeps you from colliding.
+Several agents may share this checkout; six-ten keeps you from colliding.
 
-- Just edit. With six-ten hooks installed your edits are claimed automatically: don't call
-  `six_ten_claim` or `six_ten_status` before ordinary edits. (Only if `six_ten_claim` is in your
-  tool list does your harness lack hooks; then claim files right before editing them.)
+- Just edit. Edits are claimed automatically; claim files first only if `six_ten_claim` is in your
+  tool list.
 - If an edit is refused because another agent holds the file, work on other files and retry later.
   Call `six_ten_wait` only when nothing else is left. Never get around a refusal with the shell.
 - Notes from six-ten are diffs of other agents' changes: account for them; re-read only when told to.
-- Never run `git stash`, `reset --hard`, `checkout`/`switch`, `restore`, `clean` or `pull` while
-  other agents are active. Commit only your files: `git add <paths>`, never `git add -A`/`commit -a`.";
+- Branches: all agents share the checked-out branch. Never create or switch branches while other
+  agents are active. If you're on `main` and `six-ten status` shows no other agents, start a session
+  branch first: `git switch -c agents/<YYYY-MM-DD>-<topic>`.
+- Commit your own finished files as you go: `git add <paths>` and commit, never `git add -A` or
+  `commit -a`. If a shared file is refused, commit the rest now and that file after the other
+  agent's turn ends. `Agent:` / `Co-edited-by:` trailers are added for you.
+- Tests may fail in files other agents are editing (see `six-ten status`); those aren't yours to fix.
+- Never `stash`, `reset --hard`, `checkout`/`switch`, `restore`, `clean` or `pull` while other
+  agents are active. To undo your own work, restore just your files by path.
+- The session branch goes into `main` once, at the end, through a PR (unless the user says otherwise).";
 
 /// Where a harness's configuration goes: one repository, or the user's global config.
 enum Scope {
@@ -452,33 +459,40 @@ fn merge_hooks<const N: usize>(hooks: &mut Value, wanted: [(&str, Value); N]) ->
     Ok(())
 }
 
-const PRECOMMIT_LINE: &str = "six-ten precommit || exit 1";
+/// Git hooks six-ten adds a line to: (hook name, line). The trailer hook never blocks a commit.
+const GIT_HOOKS: [(&str, &str); 2] = [
+    ("pre-commit", "six-ten precommit || exit 1"),
+    ("commit-msg", "six-ten commit-msg \"$1\" || true"),
+];
 
 fn git_hook(root: &Path) -> Result<()> {
-    let hook = write_git_hook(&pre_commit_path(root)?)?;
-    println!("git: pre-commit check in {}", hook.display());
+    for (name, line) in GIT_HOOKS {
+        let hook = write_git_hook(&hook_path(root, name)?, line)?;
+        println!("git: {name} hook in {}", hook.display());
+    }
     Ok(())
 }
 
-fn pre_commit_path(root: &Path) -> Result<PathBuf> {
-    let hook = git_out(root, &["rev-parse", "--git-path", "hooks/pre-commit"])?;
+fn hook_path(root: &Path, name: &str) -> Result<PathBuf> {
+    let hook = git_out(root, &["rev-parse", "--git-path", &format!("hooks/{name}")])?;
     Ok(root.join(hook.trim()))
 }
 
-/// Runs on every harness hook: gives the repo the commit guard without any setup. Hooks kept in
-/// the working tree (`core.hooksPath`, e.g. Husky) are the project's own files, so those are left alone.
+/// Runs on every harness hook: gives the repo the commit guard and trailers without any setup.
+/// Hooks kept in the working tree (`core.hooksPath`, e.g. Husky) are the project's own files, so
+/// those are left alone.
 pub fn ensure_git_hook(store: &crate::store::Store) -> Result<()> {
-    let flag = store.dir.join("git-hook");
+    let flag = store.dir.join("git-hooks");
     if let Ok(recorded) = fs::read_to_string(&flag) {
-        let recorded = recorded.trim();
-        if recorded == "skip"
-            || fs::read_to_string(recorded).is_ok_and(|b| b.contains(PRECOMMIT_LINE))
-        {
+        let intact = recorded
+            .lines()
+            .zip(GIT_HOOKS)
+            .all(|(path, (_, line))| fs::read_to_string(path).is_ok_and(|b| b.contains(line)));
+        if recorded.trim() == "skip" || (recorded.lines().count() == GIT_HOOKS.len() && intact) {
             return Ok(());
         }
     }
     let root = store.root();
-    let hook = pre_commit_path(root)?;
     let git_dir = PathBuf::from(
         git_out(
             root,
@@ -486,24 +500,27 @@ pub fn ensure_git_hook(store: &crate::store::Store) -> Result<()> {
         )?
         .trim(),
     );
-    let hook_dir = hook.parent().context("hook path has no parent")?;
-    fs::create_dir_all(hook_dir).ok();
-    let inside_git = hook_dir
-        .canonicalize()
-        .is_ok_and(|d| git_dir.canonicalize().is_ok_and(|g| d.starts_with(g)));
-    if !inside_git {
-        return fs::write(&flag, "skip").map_err(Into::into);
+    let mut written = Vec::new();
+    for (name, line) in GIT_HOOKS {
+        let hook = hook_path(root, name)?;
+        let hook_dir = hook.parent().context("hook path has no parent")?;
+        fs::create_dir_all(hook_dir).ok();
+        let inside_git = hook_dir
+            .canonicalize()
+            .is_ok_and(|d| git_dir.canonicalize().is_ok_and(|g| d.starts_with(g)));
+        if !inside_git {
+            return fs::write(&flag, "skip").map_err(Into::into);
+        }
+        written.push(write_git_hook(&hook, line)?.to_string_lossy().into_owned());
     }
-    let hook = write_git_hook(&hook)?;
-    fs::write(&flag, hook.to_string_lossy().as_bytes())?;
+    fs::write(&flag, written.join("\n"))?;
     Ok(())
 }
 
-fn write_git_hook(hook: &Path) -> Result<PathBuf> {
+fn write_git_hook(hook: &Path, line: &str) -> Result<PathBuf> {
     let hook = hook.to_path_buf();
-    let line = PRECOMMIT_LINE.to_string();
     let existing = fs::read_to_string(&hook).unwrap_or_default();
-    let body = if existing.contains(&line) {
+    let body = if existing.contains(line) {
         existing
     } else if existing.is_empty() {
         format!("#!/bin/sh\n{line}\n")

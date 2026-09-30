@@ -1225,3 +1225,78 @@ fn commit_guard_installs_itself_without_setup() {
     hook(&husky, "alice", "claude", edit(&husky, "src/a.rs"));
     assert!(!husky.join(".husky/pre-commit").exists());
 }
+
+fn commit(dir: &Path, agent: &str, msg: &str) -> Output {
+    Command::new("git")
+        .current_dir(dir)
+        .env("SIX_TEN_AGENT", agent)
+        .env(
+            "PATH",
+            format!(
+                "{}:{}",
+                Path::new(BIN).parent().unwrap().display(),
+                std::env::var("PATH").unwrap()
+            ),
+        )
+        .args([
+            "-c",
+            "user.name=t",
+            "-c",
+            "user.email=t@t",
+            "commit",
+            "-qm",
+            msg,
+        ])
+        .output()
+        .unwrap()
+}
+
+#[test]
+fn shared_files_wait_for_the_co_editor_and_carry_trailers() {
+    let dir = repo();
+    edit_as(&dir, "alice", "src/a.rs", "a\nalice\n");
+    // Bob edits the same file and is still mid-turn.
+    hook(
+        &dir,
+        "bob",
+        "claude",
+        tool(&dir, "PreToolUse", "Edit", "src/a.rs"),
+    );
+    fs::write(dir.join("src/a.rs"), "a\nalice\nbob\n").unwrap();
+    hook(
+        &dir,
+        "bob",
+        "claude",
+        tool(&dir, "PostToolUse", "Edit", "src/a.rs"),
+    );
+    git(&dir, &["add", "src/a.rs"]);
+    let refused = commit(&dir, "alice", "alice: a");
+    assert!(!refused.status.success());
+    assert!(
+        stderr(&refused).contains("you both edited it; bob is still working"),
+        "{}",
+        stderr(&refused)
+    );
+
+    hook(
+        &dir,
+        "bob",
+        "claude",
+        json!({"hook_event_name": "Stop", "cwd": dir}),
+    );
+    let ok = commit(&dir, "alice", "alice: a");
+    assert!(ok.status.success(), "{}", stderr(&ok));
+    let msg = String::from_utf8(
+        Command::new("git")
+            .current_dir(&dir)
+            .args(["log", "-1", "--format=%B"])
+            .output()
+            .unwrap()
+            .stdout,
+    )
+    .unwrap();
+    assert!(
+        msg.contains("Agent: alice") && msg.contains("Co-edited-by: bob"),
+        "{msg}"
+    );
+}

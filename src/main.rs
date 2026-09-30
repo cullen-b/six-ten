@@ -59,6 +59,8 @@ enum Command {
     Mcp,
     /// Git pre-commit check: refuse commits that include other agents' work.
     Precommit,
+    /// Git commit-msg hook: add Agent and Co-edited-by trailers to the message file.
+    CommitMsg { file: PathBuf },
     /// Wire six-ten into a harness for the repository at --repo (default: current directory).
     Install {
         /// claude, codex, opencode, hermes, generic (any other harness), git, or all
@@ -154,6 +156,23 @@ fn run(command: Command) -> Result<u8> {
                     let removed =
                         store.gc()? + store.trim_journal(day)? + store.trim_events(day)?;
                     println!("removed {removed} stale record(s)");
+                    Ok(0)
+                }
+                Command::CommitMsg { file } => {
+                    for trailer in policy::commit_trailers(&store, &agent)? {
+                        let status = std::process::Command::new("git")
+                            .args([
+                                "interpret-trailers",
+                                "--in-place",
+                                "--if-exists",
+                                "addIfDifferent",
+                                "--trailer",
+                                &trailer,
+                            ])
+                            .arg(&file)
+                            .status()?;
+                        anyhow::ensure!(status.success(), "git interpret-trailers failed");
+                    }
                     Ok(0)
                 }
                 Command::Precommit => {
