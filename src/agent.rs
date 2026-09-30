@@ -73,11 +73,35 @@ fn harness_ancestor() -> Option<(u32, String)> {
             return None;
         }
         if !WRAPPERS.contains(&name.as_str()) {
-            return Some((pid, name.clone()));
+            return Some((pid, script_name(pid, name).unwrap_or_else(|| name.clone())));
         }
         pid = *ppid;
     }
     None
+}
+
+/// For interpreters (Hermes runs as `python3 .../hermes`), the script's name reads better.
+fn script_name(pid: u32, comm: &str) -> Option<String> {
+    let interpreted =
+        comm.starts_with("python") || matches!(comm, "node" | "bun" | "deno" | "ruby" | "perl");
+    if !interpreted {
+        return None;
+    }
+    let out = Command::new("ps")
+        .args(["-o", "args=", "-p", &pid.to_string()])
+        .output()
+        .ok()?;
+    let args = String::from_utf8_lossy(&out.stdout);
+    let script = args
+        .split_whitespace()
+        .skip(1)
+        .find(|a| !a.starts_with('-'))?;
+    let name = script
+        .rsplit('/')
+        .next()?
+        .trim_end_matches(".py")
+        .trim_end_matches(".js");
+    (!name.is_empty()).then(|| name.to_string())
 }
 
 pub fn pid_alive(pid: u32) -> bool {

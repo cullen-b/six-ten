@@ -1,4 +1,5 @@
 mod agent;
+mod events;
 mod git;
 mod hook;
 mod install;
@@ -42,6 +43,14 @@ enum Command {
     Status,
     /// Print the agent id six-ten sees for the calling process.
     Whoami,
+    /// Follow what agents are doing: blocks, how they were resolved, and refusals.
+    Watch {
+        /// How many past events to show first.
+        #[arg(long, default_value_t = 20)]
+        history: usize,
+    },
+    /// Turn desktop notifications for this repo on or off (no argument: show the setting).
+    Notify { state: Option<String> },
     /// Remove expired leases and records of agents that have exited.
     Gc,
     /// Handle a harness hook event read from stdin (claude, codex, opencode, hermes, generic).
@@ -120,8 +129,25 @@ fn run(command: Command) -> Result<u8> {
                     print!("{}", status_text(&store, &agent)?);
                     Ok(0)
                 }
+                Command::Watch { history } => events::watch(&store, history).map(|_| 0),
+                Command::Notify { state } => {
+                    match state.as_deref() {
+                        Some("on") => store.set_notify(true)?,
+                        Some("off") => store.set_notify(false)?,
+                        Some(other) => anyhow::bail!("expected `on` or `off`, got `{other}`"),
+                        None => {}
+                    }
+                    let on = store.notify_enabled();
+                    println!(
+                        "desktop notifications are {}",
+                        if on { "on" } else { "off" }
+                    );
+                    Ok(0)
+                }
                 Command::Gc => {
-                    let removed = store.gc()? + store.trim_journal(24 * 60 * 60)?;
+                    let day = 24 * 60 * 60;
+                    let removed =
+                        store.gc()? + store.trim_journal(day)? + store.trim_events(day)?;
                     println!("removed {removed} stale record(s)");
                     Ok(0)
                 }
@@ -158,6 +184,17 @@ pub fn status_text(store: &Store, me: &Agent) -> Result<String> {
     }
     let dirty = git::dirty(store.root(), &[])?;
     let others = store.touched_by_others(&me.id, &dirty)?;
+    let events = store.events();
+    if !events.is_empty() {
+        out.push_str("recent:\n");
+        for e in events.iter().skip(events.len().saturating_sub(8)) {
+            out.push_str(&format!(
+                "  {}  ({} ago)\n",
+                events::line(e),
+                policy::human(now.saturating_sub(e.at))
+            ));
+        }
+    }
     if !others.is_empty() {
         out.push_str("uncommitted work of other agents (do not stash, reset or commit these):\n");
         for t in others {

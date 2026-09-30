@@ -223,18 +223,25 @@ fn hermes(root: &Path) -> Result<()> {
     )?;
     println!("hermes: plugin in {}, protocol in AGENTS.md", dir.display());
 
+    // Answers `mcp add`'s "Enable all tools? [Y/n]" prompt; it exits 0 even when cancelled.
     let hermes = |args: &[&str]| {
-        Command::new("hermes")
+        let mut child = Command::new("hermes")
             .args(args)
-            .stdin(std::process::Stdio::null())
-            .output()
+            .stdin(std::process::Stdio::piped())
+            .stdout(std::process::Stdio::piped())
+            .stderr(std::process::Stdio::null())
+            .spawn()?;
+        if let Some(mut stdin) = child.stdin.take() {
+            use std::io::Write;
+            let _ = stdin.write_all(b"y\n");
+        }
+        child.wait_with_output()
     };
-    let enabled = hermes(&["plugins", "enable", "six-ten"]).is_ok_and(|o| o.status.success());
     let listed =
-        hermes(&["mcp", "list"]).is_ok_and(|o| String::from_utf8_lossy(&o.stdout).contains(BIN));
-    let mcp = listed
-        || hermes(&["mcp", "add", BIN, "--command", BIN, "--args", "mcp"])
-            .is_ok_and(|o| o.status.success());
+        || hermes(&["mcp", "list"]).is_ok_and(|o| String::from_utf8_lossy(&o.stdout).contains(BIN));
+    let enabled = hermes(&["plugins", "enable", "six-ten"]).is_ok_and(|o| o.status.success());
+    let mcp = listed()
+        || (hermes(&["mcp", "add", BIN, "--command", BIN, "--args", "mcp"]).is_ok() && listed());
     if enabled && mcp {
         println!("  enabled the plugin and registered the MCP server with the hermes CLI");
     } else {

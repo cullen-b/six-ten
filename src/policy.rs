@@ -53,6 +53,7 @@ pub fn pre_edit(
     }
     match store.claim(agent, &paths, ttl())? {
         Claim::Granted => {
+            store.note_granted(&agent.id, &paths)?;
             let dirty = git::dirty(store.root(), &paths)?;
             let clean: Vec<String> = paths
                 .iter()
@@ -62,7 +63,10 @@ pub fn pre_edit(
             store.touch(agent, &paths, &clean)?;
             catch_up(store, agent, &paths)
         }
-        Claim::Conflict(leases) => Ok(Decision::Deny(conflict_message(&leases))),
+        Claim::Conflict(leases) => {
+            store.note_blocked(&agent.id, &leases)?;
+            Ok(Decision::Deny(conflict_message(&leases)))
+        }
     }
 }
 
@@ -73,6 +77,10 @@ fn catch_up(store: &Store, agent: &Agent, targets: &[String]) -> Result<Decision
         return Ok(Decision::Allow);
     }
     let mut out = String::new();
+    for t in &stale.targets {
+        let by: Vec<&str> = t.by.iter().map(String::as_str).collect();
+        store.note_stale(&agent.id, &t.path, &by.join(", "))?;
+    }
     if !stale.targets.is_empty() {
         let names: Vec<String> = stale
             .targets
@@ -218,6 +226,15 @@ pub fn pre_shell(store: &Store, agent: &Agent, cwd: &Path, command: &str) -> Res
         l
     };
     let files: Vec<&str> = hits.iter().map(|(_, f)| f.as_str()).take(12).collect();
+    store.log(
+        &agent.id,
+        "refused",
+        format!(
+            "stopped from running `{}`; it would rewrite: {}",
+            labels.join("`, `"),
+            files.join(", ")
+        ),
+    )?;
     Ok(Decision::Deny(format!(
         "six-ten: blocked `{}` because other agents are working in this checkout and it would discard or rewrite \
          their changes:\n  {}\nDo not stash, reset, restore, clean, switch branches or pull while they are active. \
@@ -253,6 +270,11 @@ pub fn pre_commit(store: &Store, agent: &Agent) -> Result<Decision> {
     }
     hits.sort();
     hits.dedup();
+    store.log(
+        &agent.id,
+        "refused",
+        format!("commit refused, it included: {}", hits.join(", ")),
+    )?;
     Ok(Decision::Deny(format!(
         "six-ten: commit blocked, it includes other agents' work:\n  {}\nUnstage them (`git restore --staged <path>`) \
          and commit only the files you changed. Set SIX_TEN_ALLOW_COMMIT=1 if the user wants them committed together.",
@@ -262,6 +284,7 @@ pub fn pre_commit(store: &Store, agent: &Agent) -> Result<Decision> {
 
 /// Releases everything held by `agent` (and its subagents).
 pub fn end(store: &Store, agent: &Agent) -> Result<Vec<String>> {
+    store.note_end(&agent.id)?;
     store.release(&agent.id, None)
 }
 
@@ -273,8 +296,15 @@ pub fn wait(
     timeout: Duration,
 ) -> Result<Decision> {
     let paths = normalize_all(store, cwd, raw_paths);
+    if let Claim::Conflict(leases) = store.claim(agent, &paths, ttl())? {
+        store.note_blocked(&agent.id, &leases)?;
+        store.note_waiting(&agent.id, &paths)?;
+    }
     match store.wait(agent, &paths, ttl(), timeout)? {
-        Claim::Granted => catch_up(store, agent, &paths),
+        Claim::Granted => {
+            store.note_granted(&agent.id, &paths)?;
+            catch_up(store, agent, &paths)
+        }
         Claim::Conflict(leases) => Ok(Decision::Deny(format!(
             "still busy after {}s. {}",
             timeout.as_secs(),

@@ -848,3 +848,100 @@ fn hermes_plugin_mode_blocks_by_exit_code_and_returns_notes() {
         "post-tool news is delivered, not blocked"
     );
 }
+
+fn events(dir: &Path) -> Vec<Value> {
+    fs::read_to_string(dir.join(".git/six-ten/events.jsonl"))
+        .unwrap_or_default()
+        .lines()
+        .map(|l| serde_json::from_str(l).unwrap())
+        .collect()
+}
+
+#[test]
+fn events_explain_blocks_and_how_they_were_resolved() {
+    let dir = repo();
+    six(&dir, "alice", &["claim", "src/a.rs"]);
+    assert_eq!(
+        hook(&dir, "bob", "claude", edit(&dir, "src/a.rs"))
+            .status
+            .code(),
+        Some(2)
+    );
+    assert_eq!(
+        hook(&dir, "bob", "claude", edit(&dir, "src/a.rs"))
+            .status
+            .code(),
+        Some(2),
+        "retries are not re-logged"
+    );
+    assert_eq!(
+        hook(&dir, "bob", "claude", edit(&dir, "src/b.rs"))
+            .status
+            .code(),
+        Some(0)
+    );
+    six(&dir, "alice", &["release"]);
+    let out = Command::new(BIN)
+        .current_dir(&dir)
+        .env("SIX_TEN_AGENT", "bob")
+        .args(["wait", "src/a.rs", "--timeout", "5"])
+        .output()
+        .unwrap();
+    assert!(out.status.success());
+
+    // Carol is blocked and ends her turn without getting the file.
+    assert_eq!(
+        hook(&dir, "carol", "claude", edit(&dir, "src/a.rs"))
+            .status
+            .code(),
+        Some(2)
+    );
+    hook(
+        &dir,
+        "carol",
+        "claude",
+        json!({"hook_event_name": "Stop", "cwd": dir}),
+    );
+    fs::write(dir.join("src/b.rs"), "bob's work\n").unwrap();
+    assert_eq!(
+        hook(&dir, "carol", "claude", bash(&dir, "git stash"))
+            .status
+            .code(),
+        Some(2)
+    );
+
+    let log = events(&dir);
+    let kinds: Vec<&str> = log.iter().map(|e| e["kind"].as_str().unwrap()).collect();
+    assert_eq!(
+        kinds,
+        ["blocked", "resolved", "blocked", "unresolved", "refused"],
+        "{log:#?}"
+    );
+    let resolved = log[1]["text"].as_str().unwrap();
+    assert!(
+        resolved.contains("got src/a.rs")
+            && resolved.contains("edited 1 other file meanwhile")
+            && resolved.contains("(alice held it)"),
+        "{resolved}"
+    );
+    assert!(
+        log[3]["text"]
+            .as_str()
+            .unwrap()
+            .contains("without editing src/a.rs (held by bob)")
+    );
+    assert!(log[4]["text"].as_str().unwrap().contains("`git stash`"));
+    let status = String::from_utf8(six(&dir, "dave", &["status"]).stdout).unwrap();
+    assert!(
+        status.contains("recent:") && status.contains("✅ bob"),
+        "{status}"
+    );
+    assert!(
+        String::from_utf8(six(&dir, "x", &["notify", "on"]).stdout)
+            .unwrap()
+            .contains("on")
+    );
+    assert!(dir.join(".git/six-ten/notify").exists());
+    six(&dir, "x", &["notify", "off"]);
+    assert!(!dir.join(".git/six-ten/notify").exists());
+}
