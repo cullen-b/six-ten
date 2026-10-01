@@ -141,8 +141,8 @@ branch. six-ten changes the workflow to fit:
   includes another agent's files is refused. A file two agents both edited waits until the other
   agent's turn ends, then commits with a `Co-edited-by:` trailer. Every agent commit gets an `Agent:`
   trailer automatically, so history stays attributable and each piece can be reverted on its own.
-- **One PR at the end.** The session branch goes into `main` through a single PR, and the PR
-  description is the session summary. To see who did what:
+- **One merge at the end.** The session branch is merged into `main` locally and `main` is pushed;
+  no PR to approve. To see who did what before merging:
 
   ```sh
   git log main.. --format='%h %s  [%(trailers:key=Agent,valueonly,separator=%x2C)]'
