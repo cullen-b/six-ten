@@ -31,7 +31,8 @@ Several agents may share this checkout; six-ten keeps you from colliding.
 - Tests may fail in files other agents are editing (see `six-ten status`); those aren't yours to fix.
 - Never `stash`, `reset --hard`, `checkout`/`switch`, `restore`, `clean` or `pull` while other
   agents are active. To undo your own work, restore just your files by path.
-- The session branch goes into `main` once, at the end, through a PR (unless the user says otherwise).";
+- The session branch goes into `main` once, at the end: merge it into `main` locally and push `main`.
+  No PR (unless the user says otherwise).";
 
 /// Where a harness's configuration goes: one repository, or the user's global config.
 enum Scope {
