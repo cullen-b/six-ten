@@ -201,7 +201,8 @@ at about 1,500 tokens.
   `hermes:97635/<session>`. Hooks, CLI calls and the MCP server all run as children of that process,
   so they agree on who's who. Subagents and sessions get their own id. A parent's lease never blocks
   its own subagents, and the git and commit checks treat a parent and its subagents as one agent. Set
-  `SIX_TEN_AGENT` to override the id.
+  `SIX_TEN_AGENT` to override the id. Codex's sandbox blocks `ps`, so commands there find their agent through
+  `CODEX_SESSION_ID`, which Codex's hooks record.
 - **Leases end on their own.** A lease is released at the end of the agent's turn, when its process
   exits (dead pids are ignored), or after 10 idle minutes (`SIX_TEN_TTL`, in seconds). A crashed agent
   never blocks anyone for long.

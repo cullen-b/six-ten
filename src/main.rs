@@ -116,12 +116,17 @@ fn run(command: Command) -> Result<u8> {
             global,
         } => install::run(&harness, &repo.unwrap_or(cwd), global).map(|_| 0),
         Command::Whoami => {
-            println!("{}", Agent::current().id);
+            let agent = Agent::current();
+            let agent = match Store::open(&cwd) {
+                Ok(store) => store.resolve(agent),
+                Err(_) => agent,
+            };
+            println!("{}", agent.id);
             Ok(0)
         }
         command => {
             let store = Store::open(&cwd)?;
-            let agent = Agent::current();
+            let agent = store.resolve(Agent::current());
             match command {
                 Command::Claim { paths, reason } => Ok(decided(
                     policy::pre_edit_with_reason(&store, &agent, &cwd, &paths, reason.as_deref())?,

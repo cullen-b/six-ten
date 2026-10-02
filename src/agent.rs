@@ -117,8 +117,12 @@ fn script_name(pid: u32, comm: &str) -> Option<String> {
 }
 
 pub fn pid_alive(pid: u32) -> bool {
-    Command::new("ps")
+    match Command::new("ps")
         .args(["-p", &pid.to_string(), "-o", "pid="])
         .output()
-        .is_ok_and(|o| o.status.success())
+    {
+        Ok(o) => o.status.success(),
+        // `ps` can't run (Codex's sandbox forbids it): assume alive, the cautious answer.
+        Err(_) => true,
+    }
 }

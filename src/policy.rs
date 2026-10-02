@@ -556,9 +556,14 @@ fn stop_reminder(store: &Store, agent: &Agent) -> Result<Option<String>> {
     if ahead == 0 && leftover.is_empty() {
         return Ok(None);
     }
+    let pushes = if git::has_remote(root, "origin") {
+        ", pushes,"
+    } else {
+        ""
+    };
     let mut text = format!(
         "six-ten: you're the last agent working. Run `six-ten finish`: it merges `{branch}` ({ahead} commit(s)) \
-         into `{default}`, pushes, and leaves the checkout on `{default}`."
+         into `{default}`{pushes} and leaves the checkout on `{default}`."
     );
     if !leftover.is_empty() {
         text.push_str(&format!(
@@ -660,6 +665,9 @@ pub fn finish(store: &Store, agent: &Agent) -> Result<Decision> {
         }
     } else {
         report.push(format!("`{branch}` had nothing new"));
+    }
+    if !remote {
+        report.push("no `origin` remote, so nothing was pushed".into());
     }
     report.push(format!("the checkout is on `{default}`"));
     let text = report.join("; ");

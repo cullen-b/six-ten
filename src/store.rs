@@ -49,6 +49,16 @@ pub struct Presence {
     pub ended: bool,
 }
 
+/// The agent a harness session belongs to, for commands that can't see their process tree.
+#[derive(Debug, Clone, Serialize, Deserialize, PartialEq)]
+struct Alias {
+    agent: String,
+    pid: Option<u32>,
+}
+
+/// Set in shells Codex runs; its sandbox hides the process tree that identifies the agent.
+const SESSION_ENV: &str = "CODEX_SESSION_ID";
+
 /// How long an agent counts as active after its last hook or tool call.
 const ACTIVE_WINDOW: u64 = 30 * 60;
 
@@ -119,6 +129,34 @@ impl Store {
                 ended: false,
             },
         )
+    }
+
+    /// Remembers that harness session `session` is `agent`, so `resolve` can find it from inside a sandbox.
+    pub fn record_session(&self, session: &str, agent: &Agent) -> Result<()> {
+        let file = self.dir.join("sessions").join(hex_sha(session));
+        let alias = Alias {
+            agent: agent.id.clone(),
+            pid: agent.pid,
+        };
+        if read_json::<Alias>(&file).as_ref() == Some(&alias) {
+            return Ok(());
+        }
+        fs::create_dir_all(self.dir.join("sessions"))?;
+        write_json(&file, &alias)
+    }
+
+    /// `agent`, or the harness agent its session belongs to when the process tree was hidden.
+    pub fn resolve(&self, agent: Agent) -> Agent {
+        if !agent.id.starts_with("pid:") {
+            return agent;
+        }
+        std::env::var(SESSION_ENV)
+            .ok()
+            .and_then(|s| read_json::<Alias>(&self.dir.join("sessions").join(hex_sha(&s))))
+            .map_or(agent, |a| Agent {
+                id: a.agent,
+                pid: a.pid,
+            })
     }
 
     /// Records that `agent_id`'s turn is over, so it no longer counts as working.

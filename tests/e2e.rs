@@ -1635,3 +1635,23 @@ fn a_worktree_commit_ignores_main_checkout_work_and_is_warned_once() {
     let ok = commit(&wt, "bob", "bob in worktree");
     assert!(ok.status.success(), "{}", stderr(&ok));
 }
+
+#[test]
+fn commands_in_codexs_sandbox_resolve_to_the_codex_agent() {
+    let dir = repo();
+    let payload = json!({"hook_event_name": "PreToolUse", "tool_name": "Bash", "cwd": dir, "session_id": "sess-1", "tool_input": {"command": "ls"}});
+    hook(&dir, "codex:77", "codex", payload);
+    // Inside the sandbox `ps` is forbidden, so six-ten only sees its own pid.
+    let whoami = |session: &str| {
+        let out = Command::new(BIN)
+            .current_dir(&dir)
+            .env("SIX_TEN_AGENT", "pid:5")
+            .env("CODEX_SESSION_ID", session)
+            .arg("whoami")
+            .output()
+            .unwrap();
+        String::from_utf8(out.stdout).unwrap().trim().to_string()
+    };
+    assert_eq!(whoami("sess-1"), "codex:77");
+    assert_eq!(whoami("unknown"), "pid:5");
+}

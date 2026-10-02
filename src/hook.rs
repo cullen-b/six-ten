@@ -97,6 +97,9 @@ pub fn handle(harness: &str, payload: &Value) -> Result<Decision> {
         return Ok(Decision::Allow);
     };
     let base = Agent::current();
+    if let Some(session) = text(&payload["session_id"]).filter(|_| harness == "codex") {
+        store.record_session(&session, &base)?;
+    }
     store.mark_hooked(crate::store::harness_of(&base.id))?;
     let _ = crate::install::ensure_git_hook(&store);
     let agent = match &sub {
