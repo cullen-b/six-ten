@@ -130,7 +130,9 @@ fn second_agent_is_blocked_until_release() {
 fn claim_reason_is_shown_to_blocked_agents() {
     let dir = repo();
     assert_eq!(
-        six(&dir, "alice", &["claim", "src/a.rs", "-m", "JWT migration"]).status.code(),
+        six(&dir, "alice", &["claim", "src/a.rs", "-m", "JWT migration"])
+            .status
+            .code(),
         Some(0)
     );
     let blocked = six(&dir, "bob", &["claim", "src/a.rs"]);
@@ -159,7 +161,11 @@ fn claim_reason_is_shown_to_blocked_agents() {
 #[test]
 fn decide_records_an_event_visible_in_status() {
     let dir = repo();
-    let out = six(&dir, "alice", &["decide", "Chose", "JWT", "over", "sessions"]);
+    let out = six(
+        &dir,
+        "alice",
+        &["decide", "Chose", "JWT", "over", "sessions"],
+    );
     assert_eq!(out.status.code(), Some(0));
     let status = String::from_utf8(six(&dir, "bob", &["status"]).stdout).unwrap();
     assert!(status.contains("Chose JWT over sessions"), "{status}");
@@ -312,7 +318,6 @@ fn git_guard_protects_other_agents_uncommitted_work() {
         "git stash",
         "git checkout -- src/a.rs",
         "git reset --hard",
-        "git switch -c other",
         "git restore src",
         "git clean -fd",
     ] {
@@ -524,12 +529,15 @@ fn edit_as(dir: &Path, agent: &str, file: &str, content: &str) {
     );
     fs::write(dir.join(file), content).unwrap();
     hook(dir, agent, "claude", tool(dir, "PostToolUse", "Edit", file));
-    hook(
-        dir,
-        agent,
-        "claude",
-        json!({"hook_event_name": "Stop", "cwd": dir}),
-    );
+    stop_uncommitted(dir, agent);
+}
+
+/// Ends `agent`'s turn without committing: the first Stop is sent back once with a reminder.
+fn stop_uncommitted(dir: &Path, agent: &str) {
+    let stop = json!({"hook_event_name": "Stop", "cwd": dir});
+    if hook(dir, agent, "claude", stop.clone()).status.code() == Some(2) {
+        assert_eq!(hook(dir, agent, "claude", stop).status.code(), Some(0));
+    }
 }
 
 fn context(o: &Output) -> String {
@@ -1327,12 +1335,7 @@ fn shared_files_wait_for_the_co_editor_and_carry_trailers() {
         stderr(&refused)
     );
 
-    hook(
-        &dir,
-        "bob",
-        "claude",
-        json!({"hook_event_name": "Stop", "cwd": dir}),
-    );
+    stop_uncommitted(&dir, "bob");
     let ok = commit(&dir, "alice", "alice: a");
     assert!(ok.status.success(), "{}", stderr(&ok));
     let msg = String::from_utf8(
@@ -1351,8 +1354,35 @@ fn shared_files_wait_for_the_co_editor_and_carry_trailers() {
 }
 
 #[test]
-fn branch_switches_wait_for_agents_that_have_not_edited_yet() {
+fn agents_never_switch_branches_or_add_worktrees() {
     let dir = repo();
+    for cmd in [
+        "git switch -c agents/2026-09-29-a",
+        "git checkout main",
+        "git worktree add -b x ../x",
+    ] {
+        let out = hook(&dir, "alice", "claude", bash(&dir, cmd));
+        assert_eq!(
+            out.status.code(),
+            Some(2),
+            "{cmd} should be refused, even alone"
+        );
+        assert!(stderr(&out).contains("six-ten session"), "{}", stderr(&out));
+    }
+    let tool = json!({"hook_event_name": "PreToolUse", "tool_name": "EnterWorktree", "cwd": dir, "tool_input": {}});
+    let out = hook(&dir, "alice", "claude", tool);
+    assert_eq!(out.status.code(), Some(2));
+    assert!(
+        stderr(&out).contains("don't create worktrees"),
+        "{}",
+        stderr(&out)
+    );
+}
+
+#[test]
+fn without_session_branches_switches_wait_for_agents_that_have_not_edited_yet() {
+    let dir = repo();
+    git(&dir, &["config", "six-ten.sessionBranches", "false"]);
     assert_eq!(
         hook(
             &dir,
@@ -1448,4 +1478,160 @@ fn agents_commit_on_one_session_branch_started_by_whoever_is_first() {
     fs::write(dir.join("src/b.rs"), "human\n").unwrap();
     git(&dir, &["add", "src/b.rs"]);
     assert!(commit(&dir, "someone", "human commit").status.success());
+}
+
+fn out_text(dir: &Path, args: &[&str]) -> String {
+    let out = Command::new("git")
+        .current_dir(dir)
+        .args(args)
+        .output()
+        .unwrap();
+    String::from_utf8(out.stdout).unwrap().trim().to_string()
+}
+
+fn stop(dir: &Path, agent: &str) -> Output {
+    hook(
+        dir,
+        agent,
+        "claude",
+        json!({"hook_event_name": "Stop", "cwd": dir}),
+    )
+}
+
+fn edit_now(dir: &Path, agent: &str, file: &str, content: &str) {
+    assert_eq!(
+        hook(dir, agent, "claude", tool(dir, "PreToolUse", "Edit", file))
+            .status
+            .code(),
+        Some(0)
+    );
+    fs::write(dir.join(file), content).unwrap();
+    hook(dir, agent, "claude", tool(dir, "PostToolUse", "Edit", file));
+}
+
+#[test]
+fn turn_end_asks_for_commits_and_the_last_agent_finishes_on_main() {
+    let dir = repo();
+    let origin = dir.with_extension("origin.git");
+    let _ = fs::remove_dir_all(&origin);
+    git(&dir, &["switch", "-q", "-c", "main"]);
+    git(&dir, &["init", "-q", "--bare", origin.to_str().unwrap()]);
+    git(&dir, &["remote", "add", "origin", origin.to_str().unwrap()]);
+    git(&dir, &["push", "-q", "origin", "main"]);
+    six(&dir, "alice", &["session", "data"]);
+    edit_now(&dir, "alice", "src/a.rs", "a\nalice\n");
+    edit_now(&dir, "bob", "src/b.rs", "b\nbob\n");
+
+    let reminded = stop(&dir, "alice");
+    assert_eq!(
+        reminded.status.code(),
+        Some(2),
+        "uncommitted work sends alice back"
+    );
+    let msg = stderr(&reminded);
+    assert!(
+        msg.contains("commit your work") && msg.contains("src/a.rs"),
+        "{msg}"
+    );
+    assert!(!msg.contains("src/b.rs"), "bob's file is bob's: {msg}");
+
+    git(&dir, &["add", "src/a.rs"]);
+    assert!(commit(&dir, "alice", "alice: a").status.success());
+    assert_eq!(
+        stop(&dir, "alice").status.code(),
+        Some(0),
+        "bob still works: alice is done"
+    );
+
+    git(&dir, &["add", "src/b.rs"]);
+    assert!(commit(&dir, "bob", "bob: b").status.success());
+    let last = stop(&dir, "bob");
+    assert_eq!(last.status.code(), Some(2));
+    assert!(
+        stderr(&last).contains("you're the last agent working"),
+        "{}",
+        stderr(&last)
+    );
+    assert_eq!(
+        stop(&dir, "bob").status.code(),
+        Some(0),
+        "the reminder comes once"
+    );
+
+    let finished = six(&dir, "bob", &["finish"]);
+    assert_eq!(finished.status.code(), Some(0), "{}", stderr(&finished));
+    let text = String::from_utf8_lossy(&finished.stdout);
+    assert!(
+        text.contains("merged `agents/") && text.contains("pushed `main`"),
+        "{text}"
+    );
+    assert_eq!(out_text(&dir, &["branch", "--show-current"]), "main");
+    assert_eq!(
+        out_text(&dir, &["rev-parse", "main"]),
+        out_text(&origin, &["rev-parse", "main"])
+    );
+    assert!(out_text(&dir, &["log", "-1", "--format=%s"]).starts_with("Merge agents/"));
+    assert_eq!(
+        fs::read_to_string(dir.join("src/b.rs")).unwrap(),
+        "b\nbob\n"
+    );
+
+    // The day's next session continues the first one's name.
+    let next =
+        String::from_utf8(six(&dir, "carol", &["session", "something else"]).stdout).unwrap();
+    assert!(next.contains("-data.2"), "{next}");
+}
+
+#[test]
+fn finish_waits_for_working_agents_and_leftovers_are_anyones_to_commit() {
+    let dir = repo();
+    git(&dir, &["switch", "-q", "-c", "main"]);
+    six(&dir, "bob", &["session", "x"]);
+    edit_as(&dir, "alice", "src/a.rs", "a\nalice\n");
+
+    let refused = six(&dir, "bob", &["finish"]);
+    assert_eq!(refused.status.code(), Some(2));
+    assert!(
+        stderr(&refused).contains("src/a.rs (left by alice"),
+        "{}",
+        stderr(&refused)
+    );
+
+    // Alice's turn is over, so bob may commit her work; she is credited.
+    git(&dir, &["add", "src/a.rs"]);
+    assert!(commit(&dir, "bob", "alice's leftover").status.success());
+    assert!(out_text(&dir, &["log", "-1", "--format=%B"]).contains("Co-edited-by: alice"));
+
+    hook(
+        &dir,
+        "carol",
+        "claude",
+        json!({"hook_event_name": "UserPromptSubmit", "cwd": dir, "prompt": "go"}),
+    );
+    let waiting = six(&dir, "bob", &["finish"]);
+    assert_eq!(waiting.status.code(), Some(0));
+    assert!(String::from_utf8_lossy(&waiting.stdout).contains("carol still working"));
+    assert!(out_text(&dir, &["branch", "--show-current"]).starts_with("agents/"));
+}
+
+#[test]
+fn a_worktree_commit_ignores_main_checkout_work_and_is_warned_once() {
+    let dir = repo();
+    let wt = dir.with_extension("wt");
+    let _ = fs::remove_dir_all(&wt);
+    git(
+        &dir,
+        &["worktree", "add", "-q", "-b", "side", wt.to_str().unwrap()],
+    );
+    edit_now(&dir, "alice", "src/b.rs", "b\nalice\n");
+    fs::write(wt.join("src/b.rs"), "b\nbob\n").unwrap();
+
+    let read = tool(&wt, "PostToolUse", "Read", "src/a.rs");
+    let note = context(&hook(&wt, "bob", "claude", read.clone()));
+    assert!(note.contains("separate worktree"), "{note}");
+    assert!(!context(&hook(&wt, "bob", "claude", read)).contains("separate worktree"));
+
+    git(&wt, &["add", "src/b.rs"]);
+    let ok = commit(&wt, "bob", "bob in worktree");
+    assert!(ok.status.success(), "{}", stderr(&ok));
 }

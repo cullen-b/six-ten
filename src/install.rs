@@ -22,17 +22,17 @@ Several agents may share this checkout; six-ten keeps you from colliding.
 - If an edit is refused because another agent holds the file, work on other files and retry later.
   Call `six_ten_wait` only when nothing else is left. Never get around a refusal with the shell.
 - Notes from six-ten are diffs of other agents' changes: account for them; re-read only when told to.
-- Branches: all agents share the checked-out branch; never create or switch branches yourself.
-  Before your first commit, run `six-ten session <topic>`: it starts today's session branch, or
-  reuses the one another agent already started.
-- Commit your own finished files as you go: `git add <paths>` and commit, never `git add -A` or
-  `commit -a`. If a shared file is refused, commit the rest now and that file after the other
-  agent's turn ends. `Agent:` / `Co-edited-by:` trailers are added for you.
+- One checkout, one branch: never create worktrees or create/switch branches yourself. Before your
+  first commit, run `six-ten session <topic>`: it starts today's session branch, or reuses the one
+  in use.
+- Commit your own finished files before your turn ends: `git add <paths>` and commit, never
+  `git add -A` or `commit -a`. Work an agent left uncommitted after its turn ended is yours to
+  commit. `Agent:` / `Co-edited-by:` trailers are added for you.
+- When six-ten says you're the last agent working, run `six-ten finish`: it merges the session
+  branch into `main`, pushes, and leaves the checkout on `main`. No PR.
 - Tests may fail in files other agents are editing (see `six-ten status`); those aren't yours to fix.
-- Never `stash`, `reset --hard`, `checkout`/`switch`, `restore`, `clean` or `pull` while other
-  agents are active. To undo your own work, restore just your files by path.
-- The session branch goes into `main` once, at the end: merge it into `main` locally and push `main`.
-  No PR (unless the user says otherwise).";
+- Never `stash`, `reset --hard`, `restore`, `clean` or `pull` while other agents are active. To undo
+  your own work, restore just your files by path.";
 
 /// Where a harness's configuration goes: one repository, or the user's global config.
 enum Scope {
@@ -142,7 +142,7 @@ fn claude(scope: &Scope) -> Result<()> {
     let wanted = [
         (
             "PreToolUse",
-            json!({"matcher": "^(Edit|Write|MultiEdit|NotebookEdit|Bash)$", "hooks": hook}),
+            json!({"matcher": "^(Edit|Write|MultiEdit|NotebookEdit|Bash|EnterWorktree)$", "hooks": hook}),
         ),
         (
             "PostToolUse",

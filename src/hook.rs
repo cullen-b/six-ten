@@ -17,6 +17,8 @@ pub enum Event {
     PostRead(Vec<String>),
     PostShell(String),
     TurnStart,
+    /// The agent's turn is over; refusing it sends the agent back to work.
+    Stop,
     End,
     Ignore,
 }
@@ -135,6 +137,7 @@ pub fn handle(harness: &str, payload: &Value) -> Result<Decision> {
                 .and_then(|_| policy::post_read(&store, &agent, &cwd, &shell_reads(&command))),
         ),
         Event::TurnStart => policy::turn_start(&store, &agent),
+        Event::Stop => policy::stop(&store, &agent),
         Event::End => policy::end(&store, &agent).map(|_| Decision::Allow),
         Event::Ignore => Ok(Decision::Allow),
     }
@@ -166,6 +169,8 @@ fn claude_or_codex(p: &Value) -> Event {
             "NotebookEdit" => strings(&[&input["notebook_path"]]),
             "apply_patch" => patch_event(patch()),
             "Bash" => shell_event(input["command"].as_str()),
+            // Claude Code's own worktree tool gets the same refusal as the shell command.
+            "EnterWorktree" => Event::PreShell("git worktree add".into()),
             _ => Event::Ignore,
         },
         "PostToolUse" => match tool {
@@ -177,7 +182,8 @@ fn claude_or_codex(p: &Value) -> Event {
             _ => Event::Ignore,
         },
         "UserPromptSubmit" => Event::TurnStart,
-        "Stop" | "SessionEnd" | "SubagentStop" => Event::End,
+        "Stop" => Event::Stop,
+        "SessionEnd" | "SubagentStop" => Event::End,
         _ => Event::Ignore,
     }
 }
@@ -221,7 +227,8 @@ fn opencode(p: &Value) -> (Event, Option<String>) {
         "tool.execute.after" if tool == "bash" => post_shell(pre()),
         "tool.execute.after" => post_write(pre()),
         "chat.message" => Event::TurnStart,
-        "session.idle" | "session.deleted" => Event::End,
+        "session.idle" => Event::Stop,
+        "session.deleted" => Event::End,
         _ => Event::Ignore,
     };
     (event, text(&p["sessionID"]))
@@ -513,7 +520,7 @@ mod tests {
             Event::PreEdit(vec!["h.py".into()])
         );
         let stop = json!({"hook_event_name": "Stop"});
-        assert_eq!(parse("claude", &stop).unwrap().0, Event::End);
+        assert_eq!(parse("claude", &stop).unwrap().0, Event::Stop);
         let read = json!({"hook_event_name": "PreToolUse", "tool_name": "Read", "tool_input": {"file_path": "a"}});
         assert_eq!(parse("claude", &read).unwrap().0, Event::Ignore);
     }

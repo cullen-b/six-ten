@@ -183,14 +183,37 @@ pub fn post_read(store: &Store, agent: &Agent, cwd: &Path, raw_paths: &[String])
 
 /// Changes to files the agent has seen that it has not been told about yet.
 pub fn news(store: &Store, agent: &Agent) -> Result<Decision> {
-    catch_up(store, agent, &[])
+    with_worktree_warning(store, agent, catch_up(store, agent, &[])?)
 }
 
 /// Start of a turn: report what changed since the last one, then reset the turn cursor.
 pub fn turn_start(store: &Store, agent: &Agent) -> Result<Decision> {
     let decision = catch_up(store, agent, &[])?;
     store.record_turn_start(&agent.id)?;
-    Ok(decision)
+    with_worktree_warning(store, agent, decision)
+}
+
+/// Tells an agent working in a linked worktree, once, that its work belongs in the main checkout.
+fn with_worktree_warning(store: &Store, agent: &Agent, decision: Decision) -> Result<Decision> {
+    let Some(main) = store.main_worktree() else {
+        return Ok(decision);
+    };
+    let branch = git::current_branch(store.root()).unwrap_or_else(|| "this branch".into());
+    let warning = format!(
+        "six-ten: you are in a separate worktree ({}). Agents in this repo share the main checkout ({}) \
+         and its branch, so do new work there. To wrap up what's here, commit your files on `{branch}` \
+         and tell the user that branch needs merging; six-ten doesn't merge worktree branches.",
+        store.root().display(),
+        main.display()
+    );
+    if !store.first_reminder(&format!("{}#worktree", agent.id), &warning)? {
+        return Ok(decision);
+    }
+    Ok(match decision {
+        Decision::Allow => Decision::Note(warning),
+        Decision::Note(n) => Decision::Note(format!("{warning}\n\n{n}")),
+        other => other,
+    })
 }
 
 /// Blocks shell commands that would discard or rewrite other agents' uncommitted work.
@@ -198,6 +221,39 @@ pub fn pre_shell(store: &Store, agent: &Agent, cwd: &Path, command: &str) -> Res
     let clobbers = git::clobbers(command);
     if clobbers.is_empty() {
         return Ok(Decision::Allow);
+    }
+    if let Some(Clobber::Worktree(label)) =
+        clobbers.iter().find(|c| matches!(c, Clobber::Worktree(_)))
+    {
+        store.log(
+            &agent.id,
+            "refused",
+            format!("stopped from running `{label}`: agents share one checkout"),
+        )?;
+        return Ok(Decision::Deny(
+            "six-ten: agents don't create worktrees here. Every agent shares this checkout and its branch, \
+             and six-ten keeps you from colliding: edit files right here and commit your own files on the \
+             session branch (run `six-ten session <topic>` first if you're on the default branch)."
+                .into(),
+        ));
+    }
+    let branch = clobbers.iter().find_map(|c| match c {
+        Clobber::Branch(label) => Some(label),
+        _ => None,
+    });
+    if let Some(label) = branch.filter(|_| git::session_branches_enabled(store.root())) {
+        store.log(
+            &agent.id,
+            "refused",
+            format!("stopped from running `{label}`: agents share the session branch"),
+        )?;
+        let default = git::default_branch(store.root());
+        return Ok(Decision::Deny(format!(
+            "six-ten: agents don't create or switch branches; every agent shares this checkout's branch. \
+             On `{default}`, run `six-ten session <topic>` before your first commit. To wrap up, commit your \
+             own files; the last agent working runs `six-ten finish`, which merges into `{default}` and \
+             switches back."
+        )));
     }
     let leases = store.others(&agent.id)?;
     let dirty = git::dirty(store.root(), &[])?;
@@ -216,6 +272,7 @@ pub fn pre_shell(store: &Store, agent: &Agent, cwd: &Path, command: &str) -> Res
                 (label, None)
             }
             Clobber::Paths(label, raw) => (label, Some(normalize_prefixes(store, cwd, raw))),
+            Clobber::Worktree(label) => (label, None),
         };
         let hit = |p: &str| {
             affected.as_ref().is_none_or(|set| {
@@ -259,7 +316,8 @@ pub fn pre_shell(store: &Store, agent: &Agent, cwd: &Path, command: &str) -> Res
         "six-ten: blocked `{}` because other agents are working in this checkout and it would discard or rewrite \
          their changes:\n  {}\nDo not stash, reset, restore, clean, switch branches or pull while they are active \
          (to start a session branch, run `six-ten session <topic>`, which is safe while others work). \
-         Operate only on your own files (e.g. `git add <your files>` then `git commit`), or ask the user.",
+         Operate only on your own files: discard yours by path, or `git add <your files>` and commit. To get \
+         back to the default branch, the last agent working runs `six-ten finish`.",
         labels.join("`, `"),
         files.join("\n  ")
     )))
@@ -294,7 +352,7 @@ pub fn pre_commit(store: &Store, agent: &Agent) -> Result<Decision> {
     let mut hits: Vec<String> = store
         .others(&agent.id)?
         .into_iter()
-        .filter(|l| staged.contains(&l.path))
+        .filter(|l| staged.contains(&l.path) && l.root.as_ref().is_none_or(|r| r == store.root()))
         .map(|l| {
             if mine.contains(&l.path) {
                 format!("{} (you both edited it; {} is still working, so commit it after its turn ends)", l.path, l.agent)
@@ -303,13 +361,18 @@ pub fn pre_commit(store: &Store, agent: &Agent) -> Result<Decision> {
             }
         })
         .collect();
+    // Work left by agents whose turn has ended is anyone's to commit.
+    let working = working_ids(store, agent)?;
     for t in store.touched_by_others(&agent.id, &staged)? {
-        hits.extend(
-            t.paths
-                .iter()
-                .filter(|p| !mine.contains(*p))
-                .map(|p| format!("{p} (uncommitted work of {})", t.agent)),
-        );
+        if !working.contains(&t.agent) {
+            continue;
+        }
+        hits.extend(t.paths.iter().filter(|p| !mine.contains(*p)).map(|p| {
+            format!(
+                "{p} (uncommitted work of {}, which is still working and will commit it)",
+                t.agent
+            )
+        }));
     }
     if hits.is_empty() {
         return Ok(Decision::Allow);
@@ -330,8 +393,9 @@ pub fn pre_commit(store: &Store, agent: &Agent) -> Result<Decision> {
         format!("commit refused, it included: {}", hits.join(", ")),
     )?;
     Ok(Decision::Deny(format!(
-        "six-ten: commit blocked, it includes other agents' work:\n  {}\nUnstage those (`git restore --staged <path>`) \
-         and commit the rest of your files now. If they belong in this commit, ask the user.",
+        "six-ten: commit blocked, it includes other agents' work in progress:\n  {}\nUnstage those \
+         (`git restore --staged <path>`) and commit the rest of your files now. The agents working on them commit \
+         them; a file you both edited is yours to commit once the other agent's turn ends.",
         hits.join("\n  ")
     )))
 }
@@ -365,11 +429,20 @@ pub fn session(store: &Store, agent: &Agent, topic: Option<&str>) -> Result<Stri
         } else {
             slug.chars().take(40).collect()
         };
-        let base = format!("agents/{date}-{slug}");
+        // Later sessions of the day continue the first one's name: `<first>.2`, `<first>.3`, ...
+        let today = git::branches_with_prefix(root, &format!("agents/{date}-"));
+        let base = today
+            .first()
+            .map(|b| {
+                b.rsplit_once('.')
+                    .filter(|(_, n)| n.parse::<u32>().is_ok())
+                    .map_or(b.as_str(), |(s, _)| s)
+            })
+            .map_or_else(|| format!("agents/{date}-{slug}"), String::from);
         let mut name = base.clone();
         let mut n = 2;
         while git::branch_exists(root, &name) {
-            name = format!("{base}-{n}");
+            name = format!("{base}.{n}");
             n += 1;
         }
         git::create_branch(root, &name)?;
@@ -392,11 +465,8 @@ pub fn commit_trailers(store: &Store, agent: &Agent) -> Result<Vec<String>> {
         out.push(format!("Agent: {}", agent.id));
     }
     let staged: HashSet<String> = git::staged(store.root())?.into_iter().collect();
-    let mine = store.touched_by(&agent.id)?;
     for t in store.touched_by_others(&agent.id, &staged)? {
-        if t.paths.iter().any(|p| mine.contains(p)) {
-            out.push(format!("Co-edited-by: {}", t.agent));
-        }
+        out.push(format!("Co-edited-by: {}", t.agent));
     }
     out.dedup();
     Ok(out)
@@ -405,7 +475,196 @@ pub fn commit_trailers(store: &Store, agent: &Agent) -> Result<Vec<String>> {
 /// Releases everything held by `agent` (and its subagents).
 pub fn end(store: &Store, agent: &Agent) -> Result<Vec<String>> {
     store.note_end(&agent.id)?;
+    store.mark_ended(&agent.id)?;
     store.release(&agent.id, None)
+}
+
+/// Ids of other agents in the middle of a turn.
+fn working_ids(store: &Store, agent: &Agent) -> Result<HashSet<String>> {
+    Ok(store
+        .working_others(&agent.id, ttl())?
+        .into_iter()
+        .map(|p| p.agent)
+        .collect())
+}
+
+/// End of the agent's turn: once per situation, sends it back to commit its files, or to run
+/// `six-ten finish` when it is the last agent working. `Allow` ends the turn.
+pub fn stop(store: &Store, agent: &Agent) -> Result<Decision> {
+    if store.main_worktree().is_some() {
+        return end(store, agent).map(|_| Decision::Allow);
+    }
+    let reminder = stop_reminder(store, agent)?;
+    match reminder {
+        Some(text) if store.first_reminder(&agent.id, &text)? => {
+            store.log(
+                &agent.id,
+                "reminded",
+                text.lines().next().unwrap_or_default().into(),
+            )?;
+            Ok(Decision::Deny(text))
+        }
+        _ => end(store, agent).map(|_| Decision::Allow),
+    }
+}
+
+fn stop_reminder(store: &Store, agent: &Agent) -> Result<Option<String>> {
+    let root = store.root();
+    let dirty = git::dirty(root, &[])?;
+    let working = working_ids(store, agent)?;
+    let others = store.touched_by_others(&agent.id, &dirty)?;
+    let held_by_working = |p: &String| {
+        others
+            .iter()
+            .any(|t| working.contains(&t.agent) && t.paths.contains(p))
+    };
+    let mut mine: Vec<String> = store
+        .touched_by(&agent.id)?
+        .into_iter()
+        .filter(|p| dirty.contains(p) && !held_by_working(p))
+        .collect();
+    let branch = git::current_branch(root);
+    let default = git::default_branch(root);
+    let on_default = branch
+        .as_deref()
+        .is_some_and(|b| git::is_default_branch(root, b));
+    if !mine.is_empty() {
+        mine.sort();
+        let session = if on_default && git::session_branches_enabled(root) {
+            "Run `six-ten session <topic>` first, then commit"
+        } else {
+            "Commit them"
+        };
+        return Ok(Some(format!(
+            "six-ten: before you finish, commit your work. These files have uncommitted changes from you and no \
+             other agent is working on them:\n  {}\n{session} with a message that describes the change: \
+             `git add <paths>` and `git commit`. Leave out anything you don't want kept, and discard it by path.",
+            mine.join("\n  ")
+        )));
+    }
+    if !working.is_empty() {
+        return Ok(None);
+    }
+    let Some(branch) = branch.filter(|b| b.starts_with("agents/")) else {
+        return Ok(None);
+    };
+    let leftover: Vec<String> = others
+        .iter()
+        .flat_map(|t| t.paths.iter().map(move |p| format!("{p} ({})", t.agent)))
+        .collect();
+    let ahead = git::ahead(root, &default, &branch);
+    if ahead == 0 && leftover.is_empty() {
+        return Ok(None);
+    }
+    let mut text = format!(
+        "six-ten: you're the last agent working. Run `six-ten finish`: it merges `{branch}` ({ahead} commit(s)) \
+         into `{default}`, pushes, and leaves the checkout on `{default}`."
+    );
+    if !leftover.is_empty() {
+        text.push_str(&format!(
+            " First commit what finished agents left uncommitted (their turns are over, so it's yours to commit; \
+             they're credited automatically):\n  {}",
+            leftover.join("\n  ")
+        ));
+    }
+    Ok(Some(text))
+}
+
+/// Merges the session branch into the default branch and leaves the checkout there. Only the last
+/// agent working may do this, and only once every agent's work is committed.
+pub fn finish(store: &Store, agent: &Agent) -> Result<Decision> {
+    let root = store.root();
+    if store.main_worktree().is_some() {
+        return Ok(Decision::Deny(
+            "six-ten: `finish` runs in the main checkout; this is a separate worktree. Commit here and tell the \
+             user which branch needs merging."
+                .into(),
+        ));
+    }
+    let default = git::default_branch(root);
+    let branch = git::current_branch(root).context("HEAD is detached; nothing to finish")?;
+    if branch == default {
+        return Ok(Decision::Note(format!(
+            "already on `{default}`; nothing to finish"
+        )));
+    }
+    let working: Vec<String> = working_ids(store, agent)?.into_iter().collect();
+    if !working.is_empty() {
+        return Ok(Decision::Note(format!(
+            "not finishing yet: {} still working. Whichever agent finishes last merges `{branch}`; there's \
+             nothing more for you to do.",
+            working.join(", ")
+        )));
+    }
+    let dirty = git::dirty(root, &[])?;
+    let mut owned: Vec<String> = store
+        .touched_by(&agent.id)?
+        .into_iter()
+        .filter(|p| dirty.contains(p))
+        .map(|p| format!("{p} (yours)"))
+        .collect();
+    for t in store.touched_by_others(&agent.id, &dirty)? {
+        owned.extend(
+            t.paths
+                .iter()
+                .map(|p| format!("{p} (left by {}, whose turn is over)", t.agent)),
+        );
+    }
+    if !owned.is_empty() {
+        owned.sort();
+        return Ok(Decision::Deny(format!(
+            "six-ten: commit these first, then run `six-ten finish` again (other agents' leftovers are yours to \
+             commit; they're credited automatically):\n  {}",
+            owned.join("\n  ")
+        )));
+    }
+    let ahead = git::ahead(root, &default, &branch);
+    let remote = git::has_remote(root, "origin");
+    let mut report = Vec::new();
+    if remote && ahead > 0 {
+        match git::run(root, &["push", "-q", "-u", "origin", &branch]) {
+            Ok(_) => report.push(format!("pushed `{branch}`")),
+            Err(e) => report.push(format!("could not push `{branch}` ({e:#})")),
+        }
+    }
+    git::run(root, &["switch", "-q", &default])?;
+    if ahead > 0 {
+        let msg = format!("Merge {branch}");
+        if let Err(e) = git::run(root, &["merge", "-q", "--no-ff", "-m", &msg, &branch]) {
+            let conflicts =
+                git::run(root, &["diff", "--name-only", "--diff-filter=U"]).unwrap_or_default();
+            let _ = git::run(root, &["merge", "--abort"]);
+            git::run(root, &["switch", "-q", &branch])?;
+            return Ok(Decision::Deny(format!(
+                "six-ten: merging `{branch}` into `{default}` failed, so nothing changed and you're back on \
+                 `{branch}`. Conflicting files: {}. Merge `{default}` into `{branch}` (`git merge {default}`), \
+                 resolve and commit, then run `six-ten finish` again.\n({e:#})",
+                if conflicts.is_empty() {
+                    "none listed".into()
+                } else {
+                    conflicts.replace('\n', ", ")
+                }
+            )));
+        }
+        report.insert(
+            0,
+            format!("merged `{branch}` ({ahead} commit(s)) into `{default}`"),
+        );
+        if remote {
+            match git::run(root, &["push", "-q", "origin", &default]) {
+                Ok(_) => report.push(format!("pushed `{default}`")),
+                Err(e) => report.push(format!(
+                    "could not push `{default}` ({e:#}); push it when you can"
+                )),
+            }
+        }
+    } else {
+        report.push(format!("`{branch}` had nothing new"));
+    }
+    report.push(format!("the checkout is on `{default}`"));
+    let text = report.join("; ");
+    store.log(&agent.id, "finish", text.clone())?;
+    Ok(Decision::Note(text))
 }
 
 pub fn wait(

@@ -122,6 +122,66 @@ pub fn current_branch(root: &Path) -> Option<String> {
     git_text(root, &["symbolic-ref", "--short", "-q", "HEAD"])
 }
 
+/// The branch session branches merge into: `origin/HEAD`'s target, else `main` or `master`.
+pub fn default_branch(root: &Path) -> String {
+    git_text(
+        root,
+        &["symbolic-ref", "--short", "-q", "refs/remotes/origin/HEAD"],
+    )
+    .and_then(|r| r.strip_prefix("origin/").map(String::from))
+    .filter(|b| branch_exists(root, b))
+    .or_else(|| {
+        ["main", "master"]
+            .into_iter()
+            .find(|b| branch_exists(root, b))
+            .map(String::from)
+    })
+    .unwrap_or_else(|| "main".into())
+}
+
+/// Runs git in `root`; on failure, the error carries git's own message.
+pub fn run(root: &Path, args: &[&str]) -> Result<String> {
+    let out = Command::new("git")
+        .arg("-C")
+        .arg(root)
+        .args(args)
+        .output()?;
+    if !out.status.success() {
+        bail!(
+            "git {} failed: {}",
+            args.join(" "),
+            String::from_utf8_lossy(&out.stderr).trim()
+        );
+    }
+    Ok(String::from_utf8_lossy(&out.stdout).trim().to_string())
+}
+
+/// Commits on `branch` that `base` doesn't have.
+pub fn ahead(root: &Path, base: &str, branch: &str) -> usize {
+    git_text(root, &["rev-list", "--count", &format!("{base}..{branch}")])
+        .and_then(|n| n.parse().ok())
+        .unwrap_or(0)
+}
+
+pub fn has_remote(root: &Path, remote: &str) -> bool {
+    git_text(root, &["remote", "get-url", remote]).is_some()
+}
+
+/// Local branches under `prefix`, most recently committed first.
+pub fn branches_with_prefix(root: &Path, prefix: &str) -> Vec<String> {
+    git_text(
+        root,
+        &[
+            "for-each-ref",
+            "--sort=-committerdate",
+            "--format=%(refname:short)",
+            &format!("refs/heads/{prefix}*"),
+        ],
+    )
+    .map(|t| t.lines().map(String::from).collect())
+    .unwrap_or_default()
+}
+
 /// `main`, `master`, or whatever `origin/HEAD` points at.
 pub fn is_default_branch(root: &Path, branch: &str) -> bool {
     let remote_default = git_text(
@@ -193,6 +253,8 @@ pub enum Clobber {
     Branch(String),
     /// Overwrites or deletes specific paths (relative to the command's cwd).
     Paths(String, Vec<String>),
+    /// Adds a worktree: a second checkout that six-ten can't coordinate with this one.
+    Worktree(String),
 }
 
 /// `command` with heredoc bodies dropped and quoted strings blanked (quotes kept as `""`), so
@@ -324,6 +386,9 @@ pub fn clobbers(command: &str) -> Vec<Clobber> {
             "switch" => found.push(Clobber::Branch(format!(
                 "{label} (switches the branch for every agent)"
             ))),
+            "worktree" if positional.first().is_some_and(|a| a == "add") => {
+                found.push(Clobber::Worktree(format!("{label} add")))
+            }
             "rebase" | "pull" | "merge" | "am" | "revert" | "cherry-pick" => {
                 found.push(Clobber::Tree(label))
             }
@@ -362,6 +427,11 @@ mod tests {
             )]
         );
         assert!(matches!(clobbers("git switch main")[0], Clobber::Branch(_)));
+        assert_eq!(
+            clobbers("git worktree add -b x ../x"),
+            vec![Clobber::Worktree("git worktree add".into())]
+        );
+        assert!(clobbers("git worktree list").is_empty());
         assert!(matches!(
             clobbers("git checkout -b agents/x")[0],
             Clobber::Branch(_)

@@ -46,6 +46,8 @@ enum Command {
     Release { paths: Vec<String> },
     /// Put this checkout on a session branch (agents/<date>-<topic>), or report the one in use.
     Session { topic: Option<String> },
+    /// Merge the session branch into the default branch and switch back (the last agent working).
+    Finish,
     /// Record a decision so it outlives the chat session; shown in status and watch.
     Decide { text: Vec<String> },
     /// Show who is editing what.
@@ -122,13 +124,7 @@ fn run(command: Command) -> Result<u8> {
             let agent = Agent::current();
             match command {
                 Command::Claim { paths, reason } => Ok(decided(
-                    policy::pre_edit_with_reason(
-                        &store,
-                        &agent,
-                        &cwd,
-                        &paths,
-                        reason.as_deref(),
-                    )?,
+                    policy::pre_edit_with_reason(&store, &agent, &cwd, &paths, reason.as_deref())?,
                     format!("claimed {}", paths.join(" ")),
                 )),
                 Command::Wait { paths, timeout } => {
@@ -151,6 +147,17 @@ fn run(command: Command) -> Result<u8> {
                     println!("{}", policy::session(&store, &agent, topic.as_deref())?);
                     Ok(0)
                 }
+                Command::Finish => match policy::finish(&store, &agent)? {
+                    Decision::Deny(reason) => {
+                        eprintln!("{reason}");
+                        Ok(2)
+                    }
+                    Decision::Note(text) => {
+                        println!("{text}");
+                        Ok(0)
+                    }
+                    _ => Ok(0),
+                },
                 Command::Decide { text } => {
                     let text = text.join(" ");
                     anyhow::ensure!(!text.is_empty(), "give the decision to record");
@@ -266,10 +273,20 @@ pub fn status_text(store: &Store, me: &Agent) -> Result<String> {
         }
     }
     if !others.is_empty() {
-        out.push_str("uncommitted work of other agents (do not stash, reset or commit these):\n");
+        let working: Vec<String> = store
+            .working_others(&me.id, policy::ttl())?
+            .into_iter()
+            .map(|p| p.agent)
+            .collect();
+        out.push_str("uncommitted work of other agents (never stash or reset these):\n");
         for t in others {
+            let state = if working.contains(&t.agent) {
+                "still working; it commits these"
+            } else {
+                "turn over; anyone may commit these"
+            };
             for p in t.paths {
-                out.push_str(&format!("  {p}  {}\n", t.agent));
+                out.push_str(&format!("  {p}  {} ({state})\n", t.agent));
             }
         }
     }
