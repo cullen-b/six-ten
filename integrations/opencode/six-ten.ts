@@ -25,7 +25,9 @@ function note(stdout: string): string | undefined {
 const pending = new Map<string, string>()
 const turnNotes = new Map<string, string>()
 
-export const SixTen = async ({ directory }: { directory: string }) => ({
+type Client = { session: { promptAsync(o: { path: { id: string }; body: { parts: { type: "text"; text: string }[] } }): Promise<unknown> } }
+
+export const SixTen = async ({ directory, client }: { directory: string; client: Client }) => ({
   "tool.execute.before": async (input: { tool: string; sessionID: string; callID: string }, output: { args: unknown }) => {
     const r = await sixTen({ event: "tool.execute.before", tool: input.tool, sessionID: input.sessionID, args: output.args, directory })
     if (r.code === 2) throw new Error(r.stderr.trim())
@@ -46,7 +48,10 @@ export const SixTen = async ({ directory }: { directory: string }) => ({
   event: async ({ event }: { event: { type: string; properties?: any } }) => {
     if (event.type === "session.idle" || event.type === "session.deleted") {
       const sessionID = event.properties?.sessionID ?? event.properties?.info?.id
-      if (sessionID) await sixTen({ event: event.type, sessionID, directory })
+      if (!sessionID) return
+      const r = await sixTen({ event: event.type, sessionID, directory })
+      // A refused turn end (uncommitted work, or last agent out) goes back to the session as a prompt.
+      if (r.code === 2 && r.stderr.trim()) await client.session.promptAsync({ path: { id: sessionID }, body: { parts: [{ type: "text", text: r.stderr.trim() }] } })
     }
   },
 })

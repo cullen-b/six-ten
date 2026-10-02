@@ -22,6 +22,9 @@ pub struct Lease {
     /// Why the holder is editing; shown to blocked agents so they can coordinate.
     #[serde(default)]
     pub reason: Option<String>,
+    /// Worktree the holder is editing in.
+    #[serde(default)]
+    pub root: Option<PathBuf>,
 }
 
 /// Files an agent has edited; kept past its leases so its uncommitted work stays attributable.
@@ -30,6 +33,9 @@ pub struct Touched {
     pub agent: String,
     pub pid: Option<u32>,
     pub paths: BTreeSet<String>,
+    /// Worktree the edits were made in; other worktrees' commits can't include them.
+    #[serde(default)]
+    pub root: Option<PathBuf>,
 }
 
 /// When an agent last ran a six-ten hook or tool in this repo.
@@ -38,7 +44,20 @@ pub struct Presence {
     pub agent: String,
     pub pid: Option<u32>,
     pub at: u64,
+    /// Its last turn ended and no hook has run since.
+    #[serde(default)]
+    pub ended: bool,
 }
+
+/// The agent a harness session belongs to, for commands that can't see their process tree.
+#[derive(Debug, Clone, Serialize, Deserialize, PartialEq)]
+struct Alias {
+    agent: String,
+    pid: Option<u32>,
+}
+
+/// Set in shells Codex runs; its sandbox hides the process tree that identifies the agent.
+const SESSION_ENV: &str = "CODEX_SESSION_ID";
 
 /// How long an agent counts as active after its last hook or tool call.
 const ACTIVE_WINDOW: u64 = 30 * 60;
@@ -96,7 +115,8 @@ impl Store {
     pub fn mark_present(&self, agent: &Agent) -> Result<()> {
         let dir = self.dir.join("presence");
         let file = dir.join(format!("{}.json", hex_sha(&agent.id)));
-        if read_json::<Presence>(&file).is_some_and(|p| now().saturating_sub(p.at) < 30) {
+        if read_json::<Presence>(&file).is_some_and(|p| !p.ended && now().saturating_sub(p.at) < 30)
+        {
             return Ok(());
         }
         fs::create_dir_all(&dir)?;
@@ -106,8 +126,79 @@ impl Store {
                 agent: agent.id.clone(),
                 pid: agent.pid,
                 at: now(),
+                ended: false,
             },
         )
+    }
+
+    /// Remembers that harness session `session` is `agent`, so `resolve` can find it from inside a sandbox.
+    pub fn record_session(&self, session: &str, agent: &Agent) -> Result<()> {
+        let file = self.dir.join("sessions").join(hex_sha(session));
+        let alias = Alias {
+            agent: agent.id.clone(),
+            pid: agent.pid,
+        };
+        if read_json::<Alias>(&file).as_ref() == Some(&alias) {
+            return Ok(());
+        }
+        fs::create_dir_all(self.dir.join("sessions"))?;
+        write_json(&file, &alias)
+    }
+
+    /// `agent`, or the harness agent its session belongs to when the process tree was hidden.
+    pub fn resolve(&self, agent: Agent) -> Agent {
+        if !agent.id.starts_with("pid:") {
+            return agent;
+        }
+        std::env::var(SESSION_ENV)
+            .ok()
+            .and_then(|s| read_json::<Alias>(&self.dir.join("sessions").join(hex_sha(&s))))
+            .map_or(agent, |a| Agent {
+                id: a.agent,
+                pid: a.pid,
+            })
+    }
+
+    /// Records that `agent_id`'s turn is over, so it no longer counts as working.
+    pub fn mark_ended(&self, agent_id: &str) -> Result<()> {
+        let file = self
+            .dir
+            .join("presence")
+            .join(format!("{}.json", hex_sha(agent_id)));
+        match read_json::<Presence>(&file) {
+            Some(p) => write_json(&file, &Presence { ended: true, ..p }),
+            None => Ok(()),
+        }
+    }
+
+    /// Other agents in the middle of a turn: active within `window` seconds and not ended since.
+    pub fn working_others(&self, agent_id: &str, window: u64) -> Result<Vec<Presence>> {
+        let now = now();
+        Ok(self
+            .active_others(agent_id)?
+            .into_iter()
+            .filter(|p| !p.ended && now.saturating_sub(p.at) <= window)
+            .collect())
+    }
+
+    /// True the first time `text` is sent to `agent_id`; repeats of the same reminder return false.
+    pub fn first_reminder(&self, agent_id: &str, text: &str) -> Result<bool> {
+        let dir = self.dir.join("reminded");
+        let file = dir.join(hex_sha(agent_id));
+        let sum = hex_sha(text);
+        if fs::read_to_string(&file).is_ok_and(|s| s == sum) {
+            return Ok(false);
+        }
+        fs::create_dir_all(&dir)?;
+        fs::write(file, sum)?;
+        Ok(true)
+    }
+
+    /// The main checkout's root when this store was opened from a linked worktree.
+    pub fn main_worktree(&self) -> Option<PathBuf> {
+        let git_dir = self.dir.parent()?;
+        let main = git_dir.parent()?;
+        (git_dir.file_name()? == ".git" && main != self.root).then(|| main.to_path_buf())
     }
 
     /// Other live agents that have been active here recently, most recent first.
@@ -189,6 +280,7 @@ impl Store {
                     acquired_at,
                     expires_at: now + ttl,
                     reason,
+                    root: Some(self.root.clone()),
                 };
                 self.write(&lease)?;
             }
@@ -285,10 +377,12 @@ impl Store {
                 agent: agent.id.clone(),
                 pid: agent.pid,
                 paths: BTreeSet::new(),
+                root: None,
             });
             let before = touched.paths.len();
             touched.paths.extend(paths.iter().cloned());
-            if touched.paths.len() != before {
+            if touched.paths.len() != before || touched.root.as_ref() != Some(&self.root) {
+                touched.root = Some(self.root.clone());
                 write_json(&file, &touched)?;
             }
             Ok(())
@@ -306,7 +400,10 @@ impl Store {
             let Some(mut t) = read_json::<Touched>(&entry?.path()) else {
                 continue;
             };
-            if !foreign(&t.agent, agent_id) || !t.pid.is_none_or(pid_alive) {
+            if !foreign(&t.agent, agent_id)
+                || !t.pid.is_none_or(pid_alive)
+                || t.root.as_ref().is_some_and(|r| *r != self.root)
+            {
                 continue;
             }
             t.paths.retain(|p| dirty.contains(p));

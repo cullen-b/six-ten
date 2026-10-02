@@ -47,7 +47,8 @@ Separate worktrees avoid all of this by giving up on sharing a checkout. six-ten
 | **Change notes** | When another agent changes a file you've read, you get a compact diff once: after your next tool call, at your next turn, or in your `six_ten_wait` result. |
 | **Stale-write stop** | About to write a file that changed since you read it? That write is refused once with the diff, and you keep the lease while you re-read. The retry goes through. |
 | **Shell coverage** | `sed -i`, `perl -pi`, `>`/`>>`, `tee`, `mv`, `cp`, `rm` and `apply_patch` heredocs count as edits, so a refusal can't be dodged through the shell. |
-| **Git guard** | `stash`, `reset --hard`, `checkout`/`switch`, `restore`, `clean`, `pull`, `merge` and `rebase` are refused while they would touch another agent's uncommitted work. |
+| **Git guard** | `stash`, `reset --hard`, `restore`, `clean`, `pull`, `merge` and `rebase` are refused while they would touch another agent's uncommitted work. Branch switches and new worktrees are always refused for agents. |
+| **Wrap-up** | At the end of its turn an agent is sent back once to commit its own files. The last agent working is told to run `six-ten finish`, which merges into `main` and leaves the checkout there. |
 | **Commit guard** | A pre-commit check refuses commits that include files another agent is editing or has left uncommitted. |
 | **Visibility** | `six-ten watch` shows a live feed of blocks, how they were resolved, and refusals. `six-ten notify on` sends desktop notifications. |
 
@@ -130,29 +131,36 @@ profile.
 A checkout can only have one branch checked out, so agents sharing one can't each have a feature
 branch. six-ten changes the workflow to fit:
 
-- **Branch per session, not per feature.** `six-ten session <topic>` puts the checkout on
+- **One checkout, one branch per session.** `six-ten session <topic>` puts the checkout on
   `agents/<date>-<topic>`. It's safe while others work: a new branch at the same commit doesn't touch
-  anyone's files. If a session branch is already checked out, it reuses it, so every agent ends up on
-  the same one. Agents' commits on `main`/`master` are refused with a pointer to that command; your
-  own commits aren't affected. Any other branch creation or switch is refused while another agent has
-  been active in the last 30 minutes. Opt out per repo with
+  anyone's files. If a branch is already checked out, it reuses it, so every agent ends up on the same
+  one. Later sessions the same day continue the first one's name: `agents/<date>-<topic>.2`, `.3`, and
+  so on. Agents' commits on `main`/`master` are refused with a pointer to that command; your own
+  commits aren't affected. Agents can't create or switch branches or add worktrees themselves
+  (`git worktree add`, Claude Code's `EnterWorktree`). Opt out of session branches per repo with
   `git config six-ten.sessionBranches false`.
-- **Commit early, per agent.** Each agent commits its own finished files as it goes. A commit that
-  includes another agent's files is refused. A file two agents both edited waits until the other
-  agent's turn ends, then commits with a `Co-edited-by:` trailer. Every agent commit gets an `Agent:`
-  trailer automatically, so history stays attributable and each piece can be reverted on its own.
-- **One merge at the end.** The session branch is merged into `main` locally and `main` is pushed;
-  no PR to approve. To see who did what before merging:
+- **Every agent commits its own work before its turn ends.** When an agent's turn ends with
+  uncommitted files that only it changed, six-ten sends it back once to commit them (Claude Code and
+  Codex through their Stop hook, OpenCode by re-prompting the session). A commit that includes files
+  another agent is still working on is refused. Once an agent's turn is over, anything it left
+  uncommitted is anyone's to commit, with a `Co-edited-by:` trailer crediting it. Every agent commit
+  gets an `Agent:` trailer, so history stays attributable and each piece can be reverted on its own.
+- **The last agent out runs `six-ten finish`.** When the agent ending its turn is the only one left
+  working, six-ten tells it to run `six-ten finish`. That pushes the session branch, merges it into
+  `main` with `--no-ff`, pushes `main`, and leaves the checkout on `main`. No PR. It does nothing while
+  another agent is mid-turn, and refuses until every agent's work is committed. If the merge
+  conflicts, it aborts and goes back to the session branch, so nothing is half-merged. To see who did
+  what:
 
   ```sh
-  git log main.. --format='%h %s  [%(trailers:key=Agent,valueonly,separator=%x2C)]'
+  git log main^1..main^2 --format='%h %s  [%(trailers:key=Agent,valueonly,separator=%x2C)]'
   ```
 - **Other agents' work in progress is visible.** A test can fail in a file another agent is halfway
-  through. `six-ten status` shows which files those are, and agents are told they aren't theirs to
-  fix.
-- **Worktrees still have a place.** Use them for long-running or experimental work that shouldn't
-  share a session branch. Leases are shared across the worktrees of one repo, so agents in different
-  worktrees still won't edit the same path at once.
+  through. `six-ten status` shows which files those are, whether their agent is still working, and
+  that they aren't yours to fix.
+- **No worktrees.** Sharing one checkout is the point. An agent that finds itself in an existing
+  worktree is told once to do new work in the main checkout. Commits there only count work in that
+  worktree, but six-ten won't merge worktree branches.
 
 These rules are part of the protocol section that `six-ten install` adds to your agents'
 instructions (`CLAUDE.md`, `AGENTS.md`).
@@ -193,7 +201,8 @@ at about 1,500 tokens.
   `hermes:97635/<session>`. Hooks, CLI calls and the MCP server all run as children of that process,
   so they agree on who's who. Subagents and sessions get their own id. A parent's lease never blocks
   its own subagents, and the git and commit checks treat a parent and its subagents as one agent. Set
-  `SIX_TEN_AGENT` to override the id.
+  `SIX_TEN_AGENT` to override the id. Codex's sandbox blocks `ps`, so commands there find their agent through
+  `CODEX_SESSION_ID`, which Codex's hooks record.
 - **Leases end on their own.** A lease is released at the end of the agent's turn, when its process
   exits (dead pids are ignored), or after 10 idle minutes (`SIX_TEN_TTL`, in seconds). A crashed agent
   never blocks anyone for long.
@@ -287,6 +296,7 @@ and [`integrations/hermes/six-ten/`](integrations/hermes/six-ten/__init__.py) (P
 six-ten install <harness>        claude | codex | opencode | hermes | generic | git | all  [--global]
 six-ten status                   active agents, leases, other agents' uncommitted work, recent events
 six-ten session [topic]          start (or reuse) this checkout's agents/<date>-<topic> branch
+six-ten finish                   last agent out: merge the session branch into main, push, switch to main
 six-ten watch [--history N]      live event feed
 six-ten notify [on|off]          desktop notifications for this repo (off by default)
 six-ten claim <paths>            claim manually; exit 2 with the reason if another agent holds any of them

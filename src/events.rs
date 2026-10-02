@@ -248,6 +248,8 @@ pub fn icon(kind: &str) -> &'static str {
         "refused" => "⛔",
         "session" => "🛣️",
         "decision" => "📝",
+        "finish" => "🏁",
+        "reminded" => "🔔",
         _ => "⚠️",
     }
 }
