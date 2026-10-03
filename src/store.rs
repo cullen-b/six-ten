@@ -159,15 +159,15 @@ impl Store {
             })
     }
 
-    /// Records that `agent_id`'s turn is over, so it no longer counts as working.
-    pub fn mark_ended(&self, agent_id: &str) -> Result<()> {
+    /// Records that `agent_id`'s turn is over, so it no longer counts as working; false if it was never seen.
+    pub fn mark_ended(&self, agent_id: &str) -> Result<bool> {
         let file = self
             .dir
             .join("presence")
             .join(format!("{}.json", hex_sha(agent_id)));
         match read_json::<Presence>(&file) {
-            Some(p) => write_json(&file, &Presence { ended: true, ..p }),
-            None => Ok(()),
+            Some(p) => write_json(&file, &Presence { ended: true, ..p }).map(|_| true),
+            None => Ok(false),
         }
     }
 

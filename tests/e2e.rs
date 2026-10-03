@@ -1615,6 +1615,46 @@ fn finish_waits_for_working_agents_and_leftovers_are_anyones_to_commit() {
 }
 
 #[test]
+fn a_stopped_agents_files_are_released_when_the_user_asks() {
+    let dir = repo();
+    git(&dir, &["switch", "-q", "-c", "main"]);
+    six(&dir, "bob", &["session", "x"]);
+    // Alice runs out of usage mid-turn: her lease and her turn stay open.
+    edit_now(&dir, "alice", "src/a.rs", "a\nalice\n");
+
+    let blocked = six(&dir, "bob", &["claim", "src/a.rs"]);
+    assert_eq!(blocked.status.code(), Some(2));
+    assert!(
+        stderr(&blocked).contains("ask the user whether to release its files")
+            && stderr(&blocked).contains("six-ten release --agent <id>"),
+        "{}",
+        stderr(&blocked)
+    );
+    let waiting = String::from_utf8(six(&dir, "bob", &["finish"]).stdout).unwrap();
+    assert!(
+        waiting.contains("alice still working") && waiting.contains("--agent"),
+        "{waiting}"
+    );
+
+    let typo = six(&dir, "bob", &["release", "--agent", "alicia"]);
+    assert_eq!(typo.status.code(), Some(1), "{}", stderr(&typo));
+
+    let released = six(&dir, "bob", &["release", "--agent", "alice"]);
+    assert_eq!(released.status.code(), Some(0), "{}", stderr(&released));
+    assert!(String::from_utf8_lossy(&released.stdout).contains("src/a.rs"));
+    assert_eq!(
+        six(&dir, "bob", &["claim", "src/a.rs"]).status.code(),
+        Some(0)
+    );
+    let status = String::from_utf8(six(&dir, "bob", &["status"]).stdout).unwrap();
+    assert!(
+        status.contains("released alice's files at the user's request")
+            && status.contains("src/a.rs  alice (turn over; anyone may commit these)"),
+        "{status}"
+    );
+}
+
+#[test]
 fn a_worktree_commit_ignores_main_checkout_work_and_is_warned_once() {
     let dir = repo();
     let wt = dir.with_extension("wt");
