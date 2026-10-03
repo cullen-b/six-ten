@@ -43,7 +43,12 @@ enum Command {
         timeout: u64,
     },
     /// Release your claims (all of them when no paths are given).
-    Release { paths: Vec<String> },
+    Release {
+        paths: Vec<String>,
+        /// Release a stopped agent's files instead (only when the user asks): its leases and its turn end.
+        #[arg(long, conflicts_with = "paths")]
+        agent: Option<String>,
+    },
     /// Put this checkout on a session branch (agents/<date>-<topic>), or report the one in use.
     Session { topic: Option<String> },
     /// Merge the session branch into the default branch and switch back (the last agent working).
@@ -137,7 +142,19 @@ fn run(command: Command) -> Result<u8> {
                         policy::wait(&store, &agent, &cwd, &paths, Duration::from_secs(timeout))?;
                     Ok(decided(d, format!("claimed {}", paths.join(" "))))
                 }
-                Command::Release { paths } => {
+                Command::Release {
+                    agent: Some(holder),
+                    ..
+                } => {
+                    let released = policy::release_agent(&store, &agent, &holder)?;
+                    println!(
+                        "released {} lease(s) of {holder} and ended its turn: {}",
+                        released.len(),
+                        released.join(", ")
+                    );
+                    Ok(0)
+                }
+                Command::Release { paths, .. } => {
                     let only: Option<Vec<String>> = (!paths.is_empty()).then(|| {
                         paths
                             .iter()

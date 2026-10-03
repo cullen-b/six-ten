@@ -479,6 +479,35 @@ pub fn end(store: &Store, agent: &Agent) -> Result<Vec<String>> {
     store.release(&agent.id, None)
 }
 
+/// Frees a stopped agent's files at the user's request: drops its leases and ends its turn, so
+/// others can edit them, commit its leftovers and finish.
+pub fn release_agent(store: &Store, me: &Agent, holder: &str) -> Result<Vec<String>> {
+    let known = store.mark_ended(holder)?;
+    let released = store.release(holder, None)?;
+    anyhow::ensure!(
+        known || !released.is_empty(),
+        "no agent `{holder}` here; `six-ten status` lists agents and what they hold"
+    );
+    store.log(
+        &me.id,
+        "released",
+        format!(
+            "released {holder}'s files at the user's request: {}",
+            released.join(", ")
+        ),
+    )?;
+    Ok(released)
+}
+
+/// Tells a blocked agent how to free files held by an agent that stopped (e.g. out of usage).
+fn stuck_hint(holders: &[&str]) -> String {
+    format!(
+        "If {} has stopped working (for example it hit its usage limit), ask the user whether to release its \
+         files; only with their OK, run `six-ten release --agent <id>`.",
+        holders.join(" or ")
+    )
+}
+
 /// Ids of other agents in the middle of a turn.
 fn working_ids(store: &Store, agent: &Agent) -> Result<HashSet<String>> {
     Ok(store
@@ -597,8 +626,9 @@ pub fn finish(store: &Store, agent: &Agent) -> Result<Decision> {
     if !working.is_empty() {
         return Ok(Decision::Note(format!(
             "not finishing yet: {} still working. Whichever agent finishes last merges `{branch}`; there's \
-             nothing more for you to do.",
-            working.join(", ")
+             nothing more for you to do. {}",
+            working.join(", "),
+            stuck_hint(&working.iter().map(String::as_str).collect::<Vec<_>>())
         )));
     }
     let dirty = git::dirty(root, &[])?;
@@ -702,6 +732,9 @@ pub fn wait(
 
 pub fn conflict_message(leases: &[Lease]) -> String {
     let now = now();
+    let mut holders: Vec<&str> = leases.iter().map(|l| l.agent.as_str()).collect();
+    holders.sort();
+    holders.dedup();
     let held: Vec<String> = leases
         .iter()
         .map(|l| {
@@ -720,8 +753,9 @@ pub fn conflict_message(leases: &[Lease]) -> String {
     format!(
         "six-ten: blocked, {}. Do not edit it now and do not work around this with shell commands. Work on other \
          files first and retry this edit later, or call the six_ten_wait tool (CLI: `six-ten wait <path>`) to block \
-         until it is free.",
-        held.join("; ")
+         until it is free. {}",
+        held.join("; "),
+        stuck_hint(&holders)
     )
 }
 

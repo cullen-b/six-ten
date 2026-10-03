@@ -205,7 +205,9 @@ at about 1,500 tokens.
   `CODEX_SESSION_ID`, which Codex's hooks record.
 - **Leases end on their own.** A lease is released at the end of the agent's turn, when its process
   exits (dead pids are ignored), or after 10 idle minutes (`SIX_TEN_TTL`, in seconds). A crashed agent
-  never blocks anyone for long.
+  never blocks anyone for long. If an agent stops mid-turn (say it hits its usage limit), a blocked agent
+  asks you whether to release its files; with your OK it runs `six-ten release --agent <id>`, which frees
+  them and ends that agent's turn, so its uncommitted work becomes anyone's to commit.
 - **Fewer tool calls for hooked harnesses.** When a harness's hooks already claim edits, its MCP server
   hides `six_ten_claim` and tells the agent to just edit. In live runs this cut Codex from 4–6 six-ten
   calls per task to 1.
@@ -304,6 +306,7 @@ six-ten claim <paths> -m "<why>"  claim with a reason blocked agents can see
 six-ten decide "<text>"          record a decision in the event feed
 six-ten wait <paths> [--timeout S]
 six-ten release [paths]          release yours (all of them if no paths are given)
+six-ten release --agent <id>     release a stopped agent's files and end its turn (when the user asks)
 six-ten whoami | gc              show your agent id | prune stale state older than a day
 six-ten mcp | hook <harness> | precommit    used by integrations
 ```
