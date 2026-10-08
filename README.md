@@ -48,7 +48,7 @@ Separate worktrees avoid all of this by giving up on sharing a checkout. six-ten
 | **Stale-write stop** | About to write a file that changed since you read it? That write is refused once with the diff, and you keep the lease while you re-read. The retry goes through. |
 | **Shell coverage** | `sed -i`, `perl -pi`, `>`/`>>`, `tee`, `mv`, `cp`, `rm` and `apply_patch` heredocs count as edits, so a refusal can't be dodged through the shell. |
 | **Git guard** | `stash`, `reset --hard`, `restore`, `clean`, `pull`, `merge` and `rebase` are refused while they would touch another agent's uncommitted work. Branch switches and new worktrees are always refused for agents. |
-| **Wrap-up** | At the end of its turn an agent is sent back once to commit its own files. The last agent working is told to run `six-ten finish`, which merges into `main` and leaves the checkout there. |
+| **Wrap-up** | At the end of its turn an agent is sent back once to commit its own files. The last agent working is told to run `six-ten finish`, which merges into `main` and leaves the checkout there. The installed instructions tell agents to wrap up before writing their final summary, so it isn't buried under the follow-up. |
 | **Commit guard** | A pre-commit check refuses commits that include files another agent is editing or has left uncommitted. |
 | **Visibility** | `six-ten watch` shows a live feed of blocks, how they were resolved, and refusals. `six-ten notify on` sends desktop notifications. |
 

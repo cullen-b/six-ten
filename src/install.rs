@@ -30,6 +30,8 @@ Several agents may share this checkout; six-ten keeps you from colliding.
   commit. `Agent:` / `Co-edited-by:` trailers are added for you.
 - When six-ten says you're the last agent working, run `six-ten finish`: it merges the session
   branch into `main`, pushes, and leaves the checkout on `main`. No PR.
+- Commit (and `six-ten finish` if you're the last agent) before writing your final summary, so the
+  summary is your last message. If six-ten sends you back anyway, repeat the full summary at the end.
 - Tests may fail in files other agents are editing (see `six-ten status`); those aren't yours to fix.
 - Never `stash`, `reset --hard`, `restore`, `clean` or `pull` while other agents are active. To undo
   your own work, restore just your files by path.";
