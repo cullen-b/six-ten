@@ -33,6 +33,8 @@ Several agents may share this checkout; six-ten keeps you from colliding.
 - Commit (and `six-ten finish` if you're the last agent) before writing your final summary, so the
   summary is your last message. If six-ten sends you back anyway, repeat the full summary at the end.
 - Tests may fail in files other agents are editing (see `six-ten status`); those aren't yours to fix.
+- Asked to start later, e.g. when the usage limit resets? Commit, then call `six_ten_wake` with the
+  task; it returns when it's time to start. Make no other calls while waiting.
 - Never `stash`, `reset --hard`, `restore`, `clean` or `pull` while other agents are active. To undo
   your own work, restore just your files by path.";
 

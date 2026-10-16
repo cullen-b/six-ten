@@ -250,7 +250,7 @@ Measured, at roughly 4 characters per token:
 
 | | When | Tokens |
 |---|---|---|
-| Protocol section in `AGENTS.md` / `CLAUDE.md` | per session (usually cached) | ~230 |
+| Protocol section in `AGENTS.md` / `CLAUDE.md` | per session (usually cached) | ~500 |
 | MCP instructions + tool definitions | per session (some harnesses load them on demand) | ~370–420 |
 | Allowed edit | every tool call | **0**: hooks print nothing |
 | "File is held" refusal | per block | ~70, plus one extra model round trip |

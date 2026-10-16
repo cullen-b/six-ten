@@ -33,7 +33,9 @@ Ask the user before step 3, and report back at the end. Don't skip the backup.
 
 5. RUN THE INSTALL AND READ ITS OUTPUT
    Every line tells you what it wrote. A line starting with "finish with:" is a command that couldn't
-   run automatically; run it, or pass it on to the user.
+   run automatically; run it, or pass it on to the user. For Hermes, add `timeout: 86400` under
+   mcp_servers.six-ten in ~/.hermes/config.yaml (with the user's OK) so six_ten_wake can sleep past
+   Hermes's 5-minute tool timeout.
 
 6. VERIFY
      claude mcp list      # six-ten ... Connected
@@ -43,6 +45,7 @@ Ask the user before step 3, and report back at the end. Don't skip the backup.
    Then run a lease smoke test inside any git repo; the second claim must fail with exit code 2:
      SIX_TEN_AGENT=a six-ten claim README.md && SIX_TEN_AGENT=b six-ten claim README.md; echo "exit $?"
      SIX_TEN_AGENT=a six-ten release
+   `six-ten usage` shows the Claude Code / Codex usage and reset times six_ten_wake will use.
 
 7. TELL THE USER THE STEPS ONLY THEY CAN DO
    - Codex: start `codex` and run `/hooks` once to approve the six-ten hooks. Until then, Codex skips

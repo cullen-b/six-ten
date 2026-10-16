@@ -163,7 +163,7 @@ pub fn plan(
     let now = now();
     let plan = if let Some(at) = at {
         Plan {
-            until: parse_at(at, now, local_offset())?,
+            until: parse_at(at, now, local_offset(now))?,
             why: "this is the time you asked to be woken".into(),
         }
     } else if let Some(m) = minutes {
@@ -191,7 +191,7 @@ pub fn plan(
     if plan.until > now + MAX_WAIT {
         return Err(format!(
             "{} is more than 24h away; pick a time within a day",
-            clock(plan.until, now, local_offset())
+            clock(plan.until, now, local_offset(plan.until))
         ));
     }
     Ok(plan)
@@ -204,7 +204,7 @@ pub fn reminder(plan: &Plan, task: Option<&str>) -> String {
         .map_or(String::new(), |t| format!(": {t}"));
     format!(
         "six-ten wake-up: it is {}; {}. Start working now{task}",
-        clock(now(), now(), local_offset()),
+        clock(now(), now(), local_offset(now())),
         plan.why
     )
 }
@@ -212,7 +212,6 @@ pub fn reminder(plan: &Plan, task: Option<&str>) -> String {
 /// `six-ten usage`: what each provider last reported.
 pub fn usage_text() -> String {
     let now = now();
-    let offset = local_offset();
     let mut out = String::new();
     for p in PROVIDERS {
         match usage(p) {
@@ -227,10 +226,14 @@ pub fn usage_text() -> String {
                                 "{} {:.0}% used, resets {}",
                                 w.name,
                                 w.used,
-                                clock(w.resets_at, now, offset)
+                                clock(w.resets_at, now, local_offset(w.resets_at))
                             )
                         } else {
-                            format!("{} reset at {}", w.name, clock(w.resets_at, now, offset))
+                            format!(
+                                "{} reset at {}",
+                                w.name,
+                                clock(w.resets_at, now, local_offset(w.resets_at))
+                            )
                         }
                     })
                     .collect();
@@ -263,14 +266,20 @@ pub fn span(secs: u64) -> String {
     }
 }
 
-/// Local UTC offset in seconds, from `date +%z` (no timezone database needed).
-pub fn local_offset() -> i64 {
-    Command::new("date")
-        .arg("+%z")
-        .output()
-        .ok()
-        .and_then(|o| parse_offset(String::from_utf8_lossy(&o.stdout).trim()))
-        .unwrap_or(0)
+/// Local UTC offset in seconds in effect at `at`, so dates across a DST change read right. Uses
+/// `date` (BSD `-r`, else GNU `-d @`) instead of a timezone database.
+pub fn local_offset(at: u64) -> i64 {
+    [
+        ["-r".to_string(), at.to_string()],
+        ["-d".to_string(), format!("@{at}")],
+    ]
+    .iter()
+    .find_map(|args| {
+        let out = Command::new("date").args(args).arg("+%z").output().ok()?;
+        out.status.success().then_some(())?;
+        parse_offset(String::from_utf8_lossy(&out.stdout).trim())
+    })
+    .unwrap_or(0)
 }
 
 /// "-0500" or "+05:30" → seconds east of UTC.
