@@ -435,7 +435,7 @@ fn mcp_server_speaks_json_rpc() {
         .collect();
     assert_eq!(replies.len(), 5, "notification gets no reply");
     assert_eq!(replies[0]["result"]["serverInfo"]["name"], "six-ten");
-    assert_eq!(replies[1]["result"]["tools"].as_array().unwrap().len(), 5);
+    assert_eq!(replies[1]["result"]["tools"].as_array().unwrap().len(), 6);
     assert_eq!(replies[2]["result"]["isError"], true);
     assert!(
         replies[2]["result"]["content"][0]["text"]
@@ -1094,6 +1094,7 @@ fn mcp_drops_claim_for_harnesses_whose_hooks_claim_edits() {
             "six_ten_wait",
             "six_ten_release",
             "six_ten_status",
+            "six_ten_wake",
             "six_ten_decide"
         ]
     );
@@ -1103,6 +1104,63 @@ fn mcp_drops_claim_for_harnesses_whose_hooks_claim_edits() {
             .unwrap()
             .contains("claimed automatically")
     );
+}
+
+#[test]
+fn wake_sleeps_then_tells_the_agent_to_start() {
+    let dir = repo();
+    let home = repo();
+    six(&dir, "claude:7", &["claim", "src/a.rs"]);
+    let mut child = Command::new(BIN)
+        .current_dir(&dir)
+        .env("SIX_TEN_AGENT", "claude:7")
+        .env("HOME", &home)
+        .env_remove("CLAUDE_CONFIG_DIR")
+        .arg("mcp")
+        .stdin(Stdio::piped())
+        .stdout(Stdio::piped())
+        .spawn()
+        .unwrap();
+    let mut stdin = child.stdin.take().unwrap();
+    for r in [
+        json!({"jsonrpc": "2.0", "id": 1, "method": "tools/call", "params": {"name": "six_ten_wake", "arguments": {}}}),
+        json!({"jsonrpc": "2.0", "id": 2, "method": "tools/call", "params": {"name": "six_ten_wake", "arguments": {"minutes": 0.02, "task": "fix the build"}, "_meta": {"progressToken": 9}}}),
+        json!({"jsonrpc": "2.0", "id": 3, "method": "ping"}),
+    ] {
+        writeln!(stdin, "{r}").unwrap();
+    }
+    // Stdin stays open: a client that goes away ends the sleep without a reply.
+    let mut lines = std::io::BufRead::lines(std::io::BufReader::new(child.stdout.take().unwrap()));
+    let replies: Vec<Value> = (0..3)
+        .map(|_| serde_json::from_str(&lines.next().unwrap().unwrap()).unwrap())
+        .collect();
+    drop(stdin);
+    child.wait().unwrap();
+    let text = |r: &Value| {
+        r["result"]["content"][0]["text"]
+            .as_str()
+            .unwrap()
+            .to_string()
+    };
+    // No usage data cached for this provider: the agent is told to ask the user.
+    assert_eq!(replies[0]["result"]["isError"], true);
+    assert!(text(&replies[0]).contains("Ask the user when their usage limit resets"));
+    // The ping is answered while the wake call sleeps.
+    assert_eq!(replies[1]["id"], 3);
+    assert_eq!(replies[2]["id"], 2);
+    assert!(text(&replies[2]).ends_with("Start working now: fix the build"));
+    // Sleeping frees the agent's files.
+    six(&dir, "codex:8", &["claim", "src/a.rs"]);
+    let status = String::from_utf8(
+        Command::new(BIN)
+            .current_dir(&dir)
+            .arg("status")
+            .output()
+            .unwrap()
+            .stdout,
+    )
+    .unwrap();
+    assert!(status.contains("sleeping until"), "{status}");
 }
 
 #[test]
@@ -1247,7 +1305,7 @@ fn global_install_keeps_existing_user_config() {
     )
     .unwrap();
     let reply: Value = serde_json::from_slice(&child.wait_with_output().unwrap().stdout).unwrap();
-    assert_eq!(reply["result"]["tools"].as_array().unwrap().len(), 4);
+    assert_eq!(reply["result"]["tools"].as_array().unwrap().len(), 5);
 }
 
 #[test]

@@ -1,5 +1,7 @@
+use std::collections::VecDeque;
 use std::io::{BufRead, Write};
 use std::path::Path;
+use std::sync::mpsc::{self, Receiver, RecvTimeoutError};
 use std::time::Duration;
 
 use anyhow::Result;
@@ -7,7 +9,9 @@ use serde_json::{Value, json};
 
 use crate::agent::Agent;
 use crate::policy::{self, Decision};
-use crate::store::Store;
+use crate::store::{Store, now};
+
+const WAKE: &str = "six_ten_wake";
 
 const HOOKED: &str = "six-ten coordinates edits between agents sharing this checkout. Your edits are claimed \
 automatically, so do not call six-ten tools before ordinary edits. If an edit is refused because another agent holds \
@@ -29,29 +33,125 @@ fn hooked(cwd: &Path, agent: &Agent) -> bool {
 pub fn serve() -> Result<()> {
     let cwd = std::env::current_dir()?;
     let agent = Agent::current();
-    let stdin = std::io::stdin();
-    let mut stdout = std::io::stdout();
-    for line in stdin.lock().lines() {
-        let line = line?;
-        if line.trim().is_empty() {
-            continue;
+    // A reader thread keeps stdin flowing while six_ten_wake sleeps, so it sees cancellations.
+    let (tx, rx) = mpsc::channel::<String>();
+    std::thread::spawn(move || {
+        for line in std::io::stdin().lock().lines().map_while(Result::ok) {
+            if tx.send(line).is_err() {
+                break;
+            }
         }
-        let Ok(msg) = serde_json::from_str::<Value>(&line) else {
-            continue;
+    });
+    let mut deferred: VecDeque<Value> = VecDeque::new();
+    loop {
+        let msg = match deferred.pop_front() {
+            Some(msg) => msg,
+            None => match rx.recv() {
+                Ok(line) => match serde_json::from_str::<Value>(&line) {
+                    Ok(msg) => msg,
+                    Err(_) => continue,
+                },
+                Err(_) => return Ok(()),
+            },
         };
         let Some(id) = msg.get("id").cloned() else {
             continue;
         };
-        let reply = match respond(&cwd, &agent, &msg) {
-            Ok(result) => json!({"jsonrpc": "2.0", "id": id, "result": result}),
-            Err((code, message)) => {
-                json!({"jsonrpc": "2.0", "id": id, "error": {"code": code, "message": message}})
+        let reply = if msg["method"] == "tools/call" && msg["params"]["name"] == WAKE {
+            match wake(&cwd, &agent, &msg, &rx, &mut deferred) {
+                Ok(Some((text, ok))) => tool_result(text, ok),
+                Ok(None) => continue,
+                Err(e) => tool_result(format!("six-ten error: {e:#}"), false),
+            }
+        } else {
+            match respond(&cwd, &agent, &msg) {
+                Ok(result) => result,
+                Err((code, message)) => {
+                    send(
+                        &json!({"jsonrpc": "2.0", "id": id, "error": {"code": code, "message": message}}),
+                    )?;
+                    continue;
+                }
             }
         };
-        writeln!(stdout, "{reply}")?;
-        stdout.flush()?;
+        send(&json!({"jsonrpc": "2.0", "id": id, "result": reply}))?;
     }
+}
+
+fn send(msg: &Value) -> Result<()> {
+    let mut stdout = std::io::stdout().lock();
+    writeln!(stdout, "{msg}")?;
+    stdout.flush()?;
     Ok(())
+}
+
+fn tool_result(text: String, ok: bool) -> Value {
+    json!({"content": [{"type": "text", "text": text}], "isError": !ok})
+}
+
+/// Sleeps until the planned time, answering pings and sending progress so the harness doesn't time
+/// out. `None` when the call was cancelled (no reply is due) or the client went away.
+fn wake(
+    cwd: &Path,
+    agent: &Agent,
+    msg: &Value,
+    rx: &Receiver<String>,
+    deferred: &mut VecDeque<Value>,
+) -> Result<Option<(String, bool)>> {
+    let args = &msg["params"]["arguments"];
+    let plan = match crate::wake::plan(
+        crate::store::harness_of(&agent.id),
+        args["at"].as_str(),
+        args["minutes"].as_f64(),
+        args["provider"].as_str(),
+    ) {
+        Ok(plan) => plan,
+        Err(reason) => return Ok(Some((reason, false))),
+    };
+    let task = args["task"].as_str().unwrap_or_default();
+    let store = Store::open(cwd)?;
+    crate::policy::sleep(&store, agent, &plan, task)?;
+    let start = now();
+    let token = msg["params"]["_meta"]["progressToken"].clone();
+    while now() < plan.until {
+        // Progress every 20s: some clients (OpenCode) time a call out after 60s without one.
+        let left = Duration::from_secs((plan.until - now()).min(20));
+        match rx.recv_timeout(left) {
+            Ok(line) => {
+                let Ok(other) = serde_json::from_str::<Value>(&line) else {
+                    continue;
+                };
+                if other["method"] == "notifications/cancelled"
+                    && other["params"]["requestId"] == msg["id"]
+                {
+                    store.log(&agent.id, "woke", "sleep cancelled".into())?;
+                    return Ok(None);
+                } else if other["method"] == "ping" {
+                    send(&json!({"jsonrpc": "2.0", "id": other["id"], "result": {}}))?;
+                } else {
+                    deferred.push_back(other);
+                }
+            }
+            Err(RecvTimeoutError::Timeout) if !token.is_null() && now() < plan.until => {
+                send(&json!({
+                    "jsonrpc": "2.0",
+                    "method": "notifications/progress",
+                    "params": {
+                        "progressToken": token,
+                        "progress": now() - start,
+                        "total": plan.until.saturating_sub(start),
+                        "message": format!("sleeping, {} left", crate::wake::span(plan.until.saturating_sub(now()))),
+                    },
+                }))?
+            }
+            Err(RecvTimeoutError::Timeout) => {}
+            Err(RecvTimeoutError::Disconnected) => return Ok(None),
+        }
+    }
+    Ok(Some((
+        crate::policy::woke(&store, agent, &plan, task)?,
+        true,
+    )))
 }
 
 fn respond(cwd: &Path, agent: &Agent, msg: &Value) -> Result<Value, (i64, String)> {
@@ -74,12 +174,8 @@ fn respond(cwd: &Path, agent: &Agent, msg: &Value) -> Result<Value, (i64, String
                 args,
             );
             Ok(match result {
-                Ok((text, ok)) => {
-                    json!({"content": [{"type": "text", "text": text}], "isError": !ok})
-                }
-                Err(e) => {
-                    json!({"content": [{"type": "text", "text": format!("six-ten error: {e:#}")}], "isError": true})
-                }
+                Ok((text, ok)) => tool_result(text, ok),
+                Err(e) => tool_result(format!("six-ten error: {e:#}"), false),
             })
         }
         other => Err((-32601, format!("method not found: {other}"))),
@@ -100,13 +196,7 @@ fn call(cwd: &Path, agent: &Agent, name: &str, args: &Value) -> Result<(String, 
     Ok(match name {
         "six_ten_status" => (crate::status_text(&store, agent)?, true),
         "six_ten_claim" => reply(
-            policy::pre_edit_with_reason(
-                &store,
-                agent,
-                cwd,
-                &paths,
-                args["reason"].as_str(),
-            )?,
+            policy::pre_edit_with_reason(&store, agent, cwd, &paths, args["reason"].as_str())?,
             format!("claimed: {}", paths.join(", ")),
         ),
         "six_ten_wait" => {
@@ -116,7 +206,8 @@ fn call(cwd: &Path, agent: &Agent, name: &str, args: &Value) -> Result<(String, 
                 format!("free and claimed for you: {}", paths.join(", ")),
             )
         }
-        "six_ten_release" => {            let only = (!paths.is_empty()).then(|| {
+        "six_ten_release" => {
+            let only = (!paths.is_empty()).then(|| {
                 paths
                     .iter()
                     .filter_map(|p| store.normalize(cwd, p))
@@ -171,6 +262,16 @@ fn tools(hooked: bool) -> Value {
             "name": "six_ten_status",
             "description": "Who is editing what. Useful for choosing what to work on; never needed before an edit.",
             "inputSchema": {"type": "object", "properties": {}},
+        }),
+        json!({
+            "name": WAKE,
+            "description": "Sleep, then get told to start working. Use when the user wants work to start later, e.g. when their usage limit resets. With no time given it wakes when your Claude Code or Codex usage window resets; if six-ten has no usage data, ask the user when their limit resets and pass `at`. Commit first: your file claims are released while you sleep. Don't retry if it times out; tell the user.",
+            "inputSchema": {"type": "object", "properties": {
+                "at": {"type": "string", "description": "Local time (\"2:30am\", \"14:05\"), RFC 3339, or Unix seconds"},
+                "minutes": {"type": "number", "description": "Wake after this many minutes instead"},
+                "provider": {"type": "string", "enum": ["claude", "codex"], "description": "Whose usage reset to wait for; default: your harness"},
+                "task": {"type": "string", "description": "What to work on after waking; repeated back to you"},
+            }},
         }),
         json!({
             "name": "six_ten_decide",
