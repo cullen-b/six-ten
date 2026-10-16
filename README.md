@@ -190,7 +190,9 @@ six-ten wake-up: it is 2:20am; your claude usage window has reset. Start working
 - **Harness timeouts.** Claude Code waits up to about 28 hours. OpenCode is fine as long as progress pings
   arrive. `install codex` sets `tool_timeout_sec = 86400` for six-ten (Codex's default is 60s). Hermes stops
   tool calls after 5 minutes, so add `timeout: 86400` under `mcp_servers.six-ten` in `~/.hermes/config.yaml`.
-  Waits are capped at 24 hours.
+  Cursor stops every MCP call after 60 seconds, so for longer waits the tool hands a Cursor agent the
+  equivalent `six-ten wake --at <time> '<task>'` command to run in its terminal, which blocks the same way.
+  Register `six-ten mcp` in `~/.cursor/mcp.json` to give Cursor the tools. Waits are capped at 24 hours.
 
 The agent has to make the call while it still has usage left. An agent that already hit its limit can't
 call anything.

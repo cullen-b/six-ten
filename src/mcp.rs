@@ -109,6 +109,20 @@ fn wake(
         Err(reason) => return Ok(Some((reason, false))),
     };
     let task = args["task"].as_str().unwrap_or_default();
+    // Cursor ends every MCP call after 60s and ignores progress, so long waits go through its shell.
+    let harness = crate::store::harness_of(&agent.id).to_ascii_lowercase();
+    if harness.contains("cursor") && plan.until > now() + 50 {
+        return Ok(Some((
+            format!(
+                "Cursor stops MCP calls after 60 seconds, so this wait can't be a tool call. Run this in the \
+                 terminal and let it finish; it blocks until it's time, then prints what to do:\n\
+                 six-ten wake --at {} '{}'",
+                plan.until,
+                task.replace('\'', "'\\''")
+            ),
+            false,
+        )));
+    }
     let store = Store::open(cwd)?;
     crate::policy::sleep(&store, agent, &plan, task)?;
     let start = now();

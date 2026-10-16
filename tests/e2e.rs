@@ -1124,7 +1124,7 @@ fn wake_sleeps_then_tells_the_agent_to_start() {
     let mut stdin = child.stdin.take().unwrap();
     for r in [
         json!({"jsonrpc": "2.0", "id": 1, "method": "tools/call", "params": {"name": "six_ten_wake", "arguments": {}}}),
-        json!({"jsonrpc": "2.0", "id": 2, "method": "tools/call", "params": {"name": "six_ten_wake", "arguments": {"minutes": 0.02, "task": "fix the build"}, "_meta": {"progressToken": 9}}}),
+        json!({"jsonrpc": "2.0", "id": 2, "method": "tools/call", "params": {"name": "six_ten_wake", "arguments": {"minutes": 0.05, "task": "fix the build"}, "_meta": {"progressToken": 9}}}),
         json!({"jsonrpc": "2.0", "id": 3, "method": "ping"}),
     ] {
         writeln!(stdin, "{r}").unwrap();
@@ -1161,6 +1161,30 @@ fn wake_sleeps_then_tells_the_agent_to_start() {
     )
     .unwrap();
     assert!(status.contains("sleeping until"), "{status}");
+}
+
+#[test]
+fn wake_sends_cursor_to_the_shell_for_long_waits() {
+    let dir = repo();
+    let mut child = Command::new(BIN)
+        .current_dir(&dir)
+        .env("SIX_TEN_AGENT", "cursor-agent:5")
+        .arg("mcp")
+        .stdin(Stdio::piped())
+        .stdout(Stdio::piped())
+        .spawn()
+        .unwrap();
+    writeln!(
+        child.stdin.take().unwrap(),
+        "{}",
+        json!({"jsonrpc": "2.0", "id": 1, "method": "tools/call", "params": {"name": "six_ten_wake", "arguments": {"minutes": 90, "task": "don't stop"}}})
+    )
+    .unwrap();
+    let reply: Value = serde_json::from_slice(&child.wait_with_output().unwrap().stdout).unwrap();
+    let text = reply["result"]["content"][0]["text"].as_str().unwrap();
+    assert_eq!(reply["result"]["isError"], true);
+    assert!(text.contains("six-ten wake --at "), "{text}");
+    assert!(text.ends_with(" 'don'\\''t stop'"), "{text}");
 }
 
 #[test]
