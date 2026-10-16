@@ -50,6 +50,7 @@ Separate worktrees avoid all of this by giving up on sharing a checkout. six-ten
 | **Git guard** | `stash`, `reset --hard`, `restore`, `clean`, `pull`, `merge` and `rebase` are refused while they would touch another agent's uncommitted work. Branch switches and new worktrees are always refused for agents. |
 | **Wrap-up** | At the end of its turn an agent is sent back once to commit its own files. The last agent working is told to run `six-ten finish`, which merges into `main` and leaves the checkout there. The installed instructions tell agents to wrap up before writing their final summary, so it isn't buried under the follow-up. |
 | **Commit guard** | A pre-commit check refuses commits that include files another agent is editing or has left uncommitted. |
+| **Wake on reset** | `six_ten_wake` (CLI: `six-ten wake`) puts an agent to sleep until a time or until your Claude Code or Codex usage window resets, then tells it to start working. See [Starting work when your usage resets](#starting-work-when-your-usage-resets). |
 | **Visibility** | `six-ten watch` shows a live feed of blocks, how they were resolved, and refusals. `six-ten notify on` sends desktop notifications. |
 
 ## Quick start
@@ -164,6 +165,35 @@ branch. six-ten changes the workflow to fit:
 
 These rules are part of the protocol section that `six-ten install` adds to your agents'
 instructions (`CLAUDE.md`, `AGENTS.md`).
+
+## Starting work when your usage resets
+
+Want agents to start coding at 2am, when your 5-hour usage window resets? Give them the task and ask them
+to wait for the reset:
+
+> When my usage resets, fix the flaky auth tests. Use six_ten_wake.
+
+The agent calls `six_ten_wake`, which blocks until then and returns:
+
+```
+six-ten wake-up: it is 2:20am; your claude usage window has reset. Start working now: fix the flaky auth tests
+```
+
+- **When to wake.** With no time given, six-ten wakes the agent a minute after its provider's usage resets. It
+  reads the usage Claude Code caches in `~/.claude.json` and the rate limits Codex logs in
+  `~/.codex/sessions`, with no network calls. If the weekly limit is used up, it waits for that reset instead.
+  For other harnesses, or when there's no data, the agent is told to ask you for the time and pass `at`
+  (`"2:30am"`, `"14:05"`, RFC 3339 or Unix seconds) or `minutes`. `six-ten usage` shows what six-ten sees.
+- **No tokens while waiting.** It is one tool call: the model makes no requests until it returns. The call
+  sends progress pings so the harness doesn't time out, and an interrupt cancels it. The sleeping agent's
+  file claims are released, so commit before sleeping.
+- **Harness timeouts.** Claude Code waits up to about 28 hours. OpenCode is fine as long as progress pings
+  arrive. `install codex` sets `tool_timeout_sec = 86400` for six-ten (Codex's default is 60s). Hermes stops
+  tool calls after 5 minutes, so add `timeout: 86400` under `mcp_servers.six-ten` in `~/.hermes/config.yaml`.
+  Waits are capped at 24 hours.
+
+The agent has to make the call while it still has usage left. An agent that already hit its limit can't
+call anything.
 
 ## What agents see
 
@@ -304,6 +334,8 @@ six-ten notify [on|off]          desktop notifications for this repo (off by def
 six-ten claim <paths>            claim manually; exit 2 with the reason if another agent holds any of them
 six-ten claim <paths> -m "<why>"  claim with a reason blocked agents can see
 six-ten decide "<text>"          record a decision in the event feed
+six-ten wake [--at T | --minutes N] [--provider P] [task]   sleep until T, N minutes, or the usage reset
+six-ten usage                    Claude Code's and Codex's last-reported usage and reset times
 six-ten wait <paths> [--timeout S]
 six-ten release [paths]          release yours (all of them if no paths are given)
 six-ten release --agent <id>     release a stopped agent's files and end its turn (when the user asks)
@@ -322,7 +354,8 @@ six-ten mcp | hook <harness> | precommit    used by integrations
 
 - Everything is local. six-ten makes no network calls and runs no daemon.
 - It only reads and writes inside the repository and its `.git/six-ten/`. `install hermes` is the
-  exception: it writes the plugin to your Hermes home.
+  exception: it writes the plugin to your Hermes home. `wake` and `usage` also read the usage figures
+  Claude Code caches in `~/.claude.json` and Codex logs in `~/.codex/sessions`.
 - The Codex profile widens the sandbox to `.git` only. Hooks and config stay read-only.
 - Hooks fail open by design. six-ten is a coordination tool for cooperating agents, not a security
   boundary against a hostile one.

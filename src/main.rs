@@ -7,6 +7,7 @@ mod journal;
 mod mcp;
 mod policy;
 mod store;
+mod wake;
 
 use std::path::PathBuf;
 use std::process::ExitCode;
@@ -57,6 +58,21 @@ enum Command {
     Decide { text: Vec<String> },
     /// Show who is editing what.
     Status,
+    /// Sleep until a time or your usage limit's reset, then print a reminder to start working.
+    Wake {
+        /// Local clock time ("2:30am", "14:05"), RFC 3339, or Unix seconds.
+        #[arg(long, conflicts_with = "minutes")]
+        at: Option<String>,
+        #[arg(long)]
+        minutes: Option<f64>,
+        /// Whose usage reset to wait for (claude, codex) when neither --at nor --minutes is given.
+        #[arg(long)]
+        provider: Option<String>,
+        /// What to work on after waking; repeated in the reminder.
+        task: Vec<String>,
+    },
+    /// Show the usage limits Claude Code and Codex last reported, and when they reset.
+    Usage,
     /// Print the agent id six-ten sees for the calling process.
     Whoami,
     /// Follow what agents are doing: blocks, how they were resolved, and refusals.
@@ -120,6 +136,10 @@ fn run(command: Command) -> Result<u8> {
             repo,
             global,
         } => install::run(&harness, &repo.unwrap_or(cwd), global).map(|_| 0),
+        Command::Usage => {
+            print!("{}", wake::usage_text());
+            Ok(0)
+        }
         Command::Whoami => {
             let agent = Agent::current();
             let agent = match Store::open(&cwd) {
@@ -185,6 +205,32 @@ fn run(command: Command) -> Result<u8> {
                     anyhow::ensure!(!text.is_empty(), "give the decision to record");
                     store.log(&agent.id, "decision", text.clone())?;
                     println!("recorded decision: {text}");
+                    Ok(0)
+                }
+                Command::Wake {
+                    at,
+                    minutes,
+                    provider,
+                    task,
+                } => {
+                    let plan = match wake::plan(
+                        store::harness_of(&agent.id),
+                        at.as_deref(),
+                        minutes,
+                        provider.as_deref(),
+                    ) {
+                        Ok(plan) => plan,
+                        Err(reason) => {
+                            eprintln!("{reason}");
+                            return Ok(2);
+                        }
+                    };
+                    let task = task.join(" ");
+                    policy::sleep(&store, &agent, &plan, &task)?;
+                    while now() < plan.until {
+                        std::thread::sleep(Duration::from_secs((plan.until - now()).min(60)));
+                    }
+                    println!("{}", policy::woke(&store, &agent, &plan, &task)?);
                     Ok(0)
                 }
                 Command::Status => {

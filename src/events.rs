@@ -251,6 +251,8 @@ pub fn icon(kind: &str) -> &'static str {
         "finish" => "🏁",
         "reminded" => "🔔",
         "released" => "🔓",
+        "sleep" => "💤",
+        "woke" => "⏰",
         _ => "⚠️",
     }
 }

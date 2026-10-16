@@ -499,6 +499,26 @@ pub fn release_agent(store: &Store, me: &Agent, holder: &str) -> Result<Vec<Stri
     Ok(released)
 }
 
+/// Before a long sleep: free the agent's files so nobody waits on them, and say when it's back.
+pub fn sleep(store: &Store, agent: &Agent, plan: &crate::wake::Plan, task: &str) -> Result<()> {
+    store.mark_present(agent)?;
+    store.release(&agent.id, None)?;
+    let until = crate::wake::clock(plan.until, now(), crate::wake::local_offset());
+    let task = if task.is_empty() {
+        String::new()
+    } else {
+        format!(": {task}")
+    };
+    store.log(&agent.id, "sleep", format!("sleeping until {until}{task}"))
+}
+
+/// After the sleep: the reminder that tells the agent to start working.
+pub fn woke(store: &Store, agent: &Agent, plan: &crate::wake::Plan, task: &str) -> Result<String> {
+    store.mark_present(agent)?;
+    store.log(&agent.id, "woke", "woke up to start working".into())?;
+    Ok(crate::wake::reminder(plan, Some(task)))
+}
+
 /// Tells a blocked agent how to free files held by an agent that stopped (e.g. out of usage).
 fn stuck_hint(holders: &[&str]) -> String {
     format!(

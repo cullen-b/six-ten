@@ -245,10 +245,20 @@ fn codex(scope: &Scope) -> Result<()> {
     if !text.is_empty() && !text.ends_with('\n') {
         text.push('\n');
     }
-    if !text.contains("[mcp_servers.six-ten]") {
-        text.push_str(&format!(
-            "\n[mcp_servers.six-ten]\ncommand = \"{BIN}\"\nargs = [\"mcp\"]\n"
-        ));
+    // six_ten_wake sleeps for hours; Codex's default tool timeout is 60s.
+    let server = "[mcp_servers.six-ten]";
+    let timeout = "tool_timeout_sec = 86400";
+    match text.find(server) {
+        None => text.push_str(&format!(
+            "\n{server}\ncommand = \"{BIN}\"\nargs = [\"mcp\"]\n{timeout}\n"
+        )),
+        Some(at) => {
+            let body = &text[at + server.len()..];
+            let section = &body[..body.find("\n[").unwrap_or(body.len())];
+            if !section.contains("tool_timeout_sec") {
+                text.insert_str(at + server.len(), &format!("\n{timeout}"));
+            }
+        }
     }
     // Codex's sandbox keeps .git read-only, so agents can't commit. This profile opens .git but
     // keeps hooks and config read-only: writing either would run code outside the sandbox.
@@ -419,6 +429,11 @@ fn hermes(scope: &Scope) -> Result<()> {
     let enabled = hermes(&["plugins", "enable", "six-ten"]).is_ok_and(|o| o.status.success());
     let mcp = listed()
         || (hermes(&["mcp", "add", BIN, "--command", BIN, "--args", "mcp"]).is_ok() && listed());
+    println!(
+        "  so six_ten_wake can sleep past Hermes's 5-minute tool timeout, add `timeout: 86400` under \
+         mcp_servers.six-ten in {}",
+        home.join("config.yaml").display()
+    );
     if enabled && mcp {
         println!("  enabled the plugin and registered the MCP server with the hermes CLI");
     } else {
