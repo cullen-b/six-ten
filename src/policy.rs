@@ -503,7 +503,7 @@ pub fn release_agent(store: &Store, me: &Agent, holder: &str) -> Result<Vec<Stri
 pub fn sleep(store: &Store, agent: &Agent, plan: &crate::wake::Plan, task: &str) -> Result<()> {
     store.mark_present(agent)?;
     store.release(&agent.id, None)?;
-    let until = crate::wake::clock(plan.until, now(), crate::wake::local_offset());
+    let until = crate::wake::clock(plan.until, now(), crate::wake::local_offset(plan.until));
     let task = if task.is_empty() {
         String::new()
     } else {
