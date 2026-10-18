@@ -500,7 +500,12 @@ pub fn release_agent(store: &Store, me: &Agent, holder: &str) -> Result<Vec<Stri
 }
 
 /// Before a long sleep: free the agent's files so nobody waits on them, and say when it's back.
-pub fn sleep(store: Option<&Store>, agent: &Agent, plan: &crate::wake::Plan, task: &str) -> Result<()> {
+pub fn sleep(
+    store: Option<&Store>,
+    agent: &Agent,
+    plan: &crate::wake::Plan,
+    task: &str,
+) -> Result<()> {
     // Outside a git repo there are no claims to free; the sleep itself still works.
     let Some(store) = store else {
         return Ok(());
@@ -517,7 +522,12 @@ pub fn sleep(store: Option<&Store>, agent: &Agent, plan: &crate::wake::Plan, tas
 }
 
 /// After the sleep: the reminder that tells the agent to start working.
-pub fn woke(store: Option<&Store>, agent: &Agent, plan: &crate::wake::Plan, task: &str) -> Result<String> {
+pub fn woke(
+    store: Option<&Store>,
+    agent: &Agent,
+    plan: &crate::wake::Plan,
+    task: &str,
+) -> Result<String> {
     if let Some(store) = store {
         store.mark_present(agent)?;
         store.log(&agent.id, "woke", "woke up to start working".into())?;
@@ -549,7 +559,13 @@ pub fn stop(store: &Store, agent: &Agent) -> Result<Decision> {
     if store.main_worktree().is_some() {
         return end(store, agent).map(|_| Decision::Allow);
     }
-    let reminder = stop_reminder(store, agent)?;
+    let reminder = stop_reminder(store, agent)?.map(|r| {
+        let (Reminder::Commit(text) | Reminder::Finish(text)) = r;
+        format!(
+            "{text}\nOnce that's done, end your turn with your full summary again, even if you already wrote \
+             it: the user reads your last message, and this reminder pushed your summary up out of view."
+        )
+    });
     match reminder {
         Some(text) if store.first_reminder(&agent.id, &text)? => {
             store.log(
@@ -563,7 +579,29 @@ pub fn stop(store: &Store, agent: &Agent) -> Result<Decision> {
     }
 }
 
-fn stop_reminder(store: &Store, agent: &Agent) -> Result<Option<String>> {
+/// Why an agent can't end its turn yet.
+enum Reminder {
+    Commit(String),
+    Finish(String),
+}
+
+/// After a commit: tells the last agent working to finish now, before it writes its summary.
+pub fn finish_nudge(store: &Store, agent: &Agent, decision: Decision) -> Result<Decision> {
+    let Some(Reminder::Finish(text)) = stop_reminder(store, agent)? else {
+        return Ok(decision);
+    };
+    let nudge = format!(
+        "{text}\nIf your task is done, run it now, before you write your final summary, so the summary is your \
+         last message."
+    );
+    Ok(match decision {
+        Decision::Allow => Decision::Note(nudge),
+        Decision::Note(n) => Decision::Note(format!("{n}\n\n{nudge}")),
+        other => other,
+    })
+}
+
+fn stop_reminder(store: &Store, agent: &Agent) -> Result<Option<Reminder>> {
     let root = store.root();
     let dirty = git::dirty(root, &[])?;
     let working = working_ids(store, agent)?;
@@ -590,12 +628,12 @@ fn stop_reminder(store: &Store, agent: &Agent) -> Result<Option<String>> {
         } else {
             "Commit them"
         };
-        return Ok(Some(format!(
+        return Ok(Some(Reminder::Commit(format!(
             "six-ten: before you finish, commit your work. These files have uncommitted changes from you and no \
              other agent is working on them:\n  {}\n{session} with a message that describes the change: \
              `git add <paths>` and `git commit`. Leave out anything you don't want kept, and discard it by path.",
             mine.join("\n  ")
-        )));
+        ))));
     }
     if !working.is_empty() {
         return Ok(None);
@@ -627,7 +665,7 @@ fn stop_reminder(store: &Store, agent: &Agent) -> Result<Option<String>> {
             leftover.join("\n  ")
         ));
     }
-    Ok(Some(text))
+    Ok(Some(Reminder::Finish(text)))
 }
 
 /// Merges the session branch into the default branch and leaves the checkout there. Only the last

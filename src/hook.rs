@@ -135,10 +135,16 @@ pub fn handle(harness: &str, payload: &Value) -> Result<Decision> {
         }
         Event::PostWrite(paths) => done(policy::post_write(&store, &agent, &cwd, &paths)),
         Event::PostRead(paths) => done(policy::post_read(&store, &agent, &cwd, &paths)),
-        Event::PostShell(command) => done(
-            policy::post_write(&store, &agent, &cwd, &shell_writes(&command))
-                .and_then(|_| policy::post_read(&store, &agent, &cwd, &shell_reads(&command))),
-        ),
+        Event::PostShell(command) => {
+            let decision = done(
+                policy::post_write(&store, &agent, &cwd, &shell_writes(&command))
+                    .and_then(|_| policy::post_read(&store, &agent, &cwd, &shell_reads(&command))),
+            )?;
+            if harness == "hermes" || !crate::git::commits(&command) {
+                return Ok(decision);
+            }
+            policy::finish_nudge(&store, &agent, decision)
+        }
         Event::TurnStart => policy::turn_start(&store, &agent),
         Event::Stop => policy::stop(&store, &agent),
         Event::End => policy::end(&store, &agent).map(|_| Decision::Allow),
@@ -185,10 +191,18 @@ fn claude_or_codex(p: &Value) -> Event {
             _ => Event::Ignore,
         },
         "UserPromptSubmit" => Event::TurnStart,
+        // A running background task wakes the agent again when it ends, so the turn isn't over yet.
+        "Stop" if waiting_on_background(p) => Event::Ignore,
         "Stop" => Event::Stop,
         "SessionEnd" | "SubagentStop" => Event::End,
         _ => Event::Ignore,
     }
+}
+
+fn waiting_on_background(p: &Value) -> bool {
+    p["background_tasks"]
+        .as_array()
+        .is_some_and(|tasks| tasks.iter().any(|t| t["status"] == "running"))
 }
 
 /// Turns a pre-write event into the matching post-write one.
@@ -522,8 +536,11 @@ mod tests {
             parse("hermes", &hermes).unwrap().0,
             Event::PreEdit(vec!["h.py".into()])
         );
-        let stop = json!({"hook_event_name": "Stop"});
+        let stop =
+            json!({"hook_event_name": "Stop", "background_tasks": [{"status": "completed"}]});
         assert_eq!(parse("claude", &stop).unwrap().0, Event::Stop);
+        let waiting = json!({"hook_event_name": "Stop", "background_tasks": [{"id": "b1", "status": "running"}]});
+        assert_eq!(parse("claude", &waiting).unwrap().0, Event::Ignore);
         let read = json!({"hook_event_name": "PreToolUse", "tool_name": "Read", "tool_input": {"file_path": "a"}});
         assert_eq!(parse("claude", &read).unwrap().0, Event::Ignore);
     }

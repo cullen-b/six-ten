@@ -48,7 +48,7 @@ Separate worktrees avoid all of this by giving up on sharing a checkout. six-ten
 | **Stale-write stop** | About to write a file that changed since you read it? That write is refused once with the diff, and you keep the lease while you re-read. The retry goes through. |
 | **Shell coverage** | `sed -i`, `perl -pi`, `>`/`>>`, `tee`, `mv`, `cp`, `rm` and `apply_patch` heredocs count as edits, so a refusal can't be dodged through the shell. |
 | **Git guard** | `stash`, `reset --hard`, `restore`, `clean`, `pull`, `merge` and `rebase` are refused while they would touch another agent's uncommitted work. Branch switches and new worktrees are always refused for agents. |
-| **Wrap-up** | At the end of its turn an agent is sent back once to commit its own files. The last agent working is told to run `six-ten finish`, which merges into `main` and leaves the checkout there. The installed instructions tell agents to wrap up before writing their final summary, so it isn't buried under the follow-up. |
+| **Wrap-up** | At the end of its turn an agent is sent back once to commit its own files. The last agent working is told to run `six-ten finish`, which merges into `main` and leaves the checkout there. The commit itself tells the last agent to finish before writing its final summary, so the summary isn't buried under a follow-up; an agent sent back anyway is told to repeat it. An agent waiting on a background task isn't sent back, since its turn resumes when the task ends. |
 | **Commit guard** | A pre-commit check refuses commits that include files another agent is editing or has left uncommitted. |
 | **Wake on reset** | `six_ten_wake` (CLI: `six-ten wake`) puts an agent to sleep until a time or until your Claude Code or Codex usage window resets, then tells it to start working. See [Starting work when your usage resets](#starting-work-when-your-usage-resets). |
 | **Visibility** | `six-ten watch` shows a live feed of blocks, how they were resolved, and refusals. `six-ten notify on` sends desktop notifications. |
@@ -142,12 +142,15 @@ branch. six-ten changes the workflow to fit:
   `git config six-ten.sessionBranches false`.
 - **Every agent commits its own work before its turn ends.** When an agent's turn ends with
   uncommitted files that only it changed, six-ten sends it back once to commit them (Claude Code and
-  Codex through their Stop hook, OpenCode by re-prompting the session). A commit that includes files
+  Codex through their Stop hook, OpenCode by re-prompting the session). In Claude Code, a turn that
+  ends while one of its background tasks is still running isn't the end of its work, so it isn't sent
+  back. A commit that includes files
   another agent is still working on is refused. Once an agent's turn is over, anything it left
   uncommitted is anyone's to commit, with a `Co-edited-by:` trailer crediting it. Every agent commit
   gets an `Agent:` trailer, so history stays attributable and each piece can be reverted on its own.
 - **The last agent out runs `six-ten finish`.** When the agent ending its turn is the only one left
-  working, six-ten tells it to run `six-ten finish`. That pushes the session branch, merges it into
+  working, six-ten tells it to run `six-ten finish`, right after its commit so it can finish before
+  writing its summary, and again at turn end if it didn't. That pushes the session branch, merges it into
   `main` with `--no-ff`, pushes `main`, and leaves the checkout on `main`. No PR. It does nothing while
   another agent is mid-turn, and refuses until every agent's work is committed. If the merge
   conflicts, it aborts and goes back to the session branch, so nothing is half-merged. To see who did
