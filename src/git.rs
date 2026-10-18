@@ -300,9 +300,9 @@ pub fn skeleton(command: &str) -> String {
     out
 }
 
-/// Finds git invocations in `command` that discard or rewrite working-tree files.
-pub fn clobbers(command: &str) -> Vec<Clobber> {
-    let mut found = Vec::new();
+/// Each git invocation in `command` as its subcommand and the arguments after it.
+fn git_calls(command: &str) -> Vec<(String, Vec<String>)> {
+    let mut calls = Vec::new();
     let separated = skeleton(command).replace("&&", ";").replace("||", ";");
     for segment in separated.split([';', '|', '&', '\n', '(', ')', '{', '}']) {
         let tokens: Vec<String> = segment
@@ -316,7 +316,6 @@ pub fn clobbers(command: &str) -> Vec<Clobber> {
             continue;
         };
         let mut rest = tokens[git + 1..].iter();
-        let mut sub = None;
         while let Some(t) = rest.next() {
             match t.as_str() {
                 "-C" | "-c" | "--git-dir" | "--work-tree" | "--namespace" => {
@@ -324,13 +323,25 @@ pub fn clobbers(command: &str) -> Vec<Clobber> {
                 }
                 t if t.starts_with('-') => {}
                 t => {
-                    sub = Some(t.to_string());
+                    calls.push((t.to_string(), rest.cloned().collect()));
                     break;
                 }
             }
         }
-        let Some(sub) = sub else { continue };
-        let args: Vec<&str> = rest.map(String::as_str).collect();
+    }
+    calls
+}
+
+/// Whether `command` runs `git commit`.
+pub fn commits(command: &str) -> bool {
+    git_calls(command).iter().any(|(sub, _)| sub == "commit")
+}
+
+/// Finds git invocations in `command` that discard or rewrite working-tree files.
+pub fn clobbers(command: &str) -> Vec<Clobber> {
+    let mut found = Vec::new();
+    for (sub, args) in git_calls(command) {
+        let args: Vec<&str> = args.iter().map(String::as_str).collect();
         let label = format!("git {sub}");
         let positional: Vec<String> = args
             .iter()
@@ -401,6 +412,12 @@ pub fn clobbers(command: &str) -> Vec<Clobber> {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn spots_commits() {
+        assert!(commits("git add a.rs && git -C . commit -m 'fix'"));
+        assert!(!commits("git log --grep commit && echo 'git commit'"));
+    }
 
     #[test]
     fn flags_destructive_commands() {

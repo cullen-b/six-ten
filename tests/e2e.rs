@@ -1200,8 +1200,17 @@ fn wake_works_outside_a_git_repo() {
         .output()
         .unwrap();
     let stdout = String::from_utf8_lossy(&out.stdout);
-    assert!(out.status.success(), "{}", String::from_utf8_lossy(&out.stderr));
-    assert!(stdout.trim_end().ends_with("Start working now: run the test"), "{stdout}");
+    assert!(
+        out.status.success(),
+        "{}",
+        String::from_utf8_lossy(&out.stderr)
+    );
+    assert!(
+        stdout
+            .trim_end()
+            .ends_with("Start working now: run the test"),
+        "{stdout}"
+    );
 }
 
 #[test]
@@ -1657,6 +1666,7 @@ fn turn_end_asks_for_commits_and_the_last_agent_finishes_on_main() {
         "{msg}"
     );
     assert!(!msg.contains("src/b.rs"), "bob's file is bob's: {msg}");
+    assert!(msg.contains("full summary again"), "{msg}");
 
     git(&dir, &["add", "src/a.rs"]);
     assert!(commit(&dir, "alice", "alice: a").status.success());
@@ -1668,6 +1678,31 @@ fn turn_end_asks_for_commits_and_the_last_agent_finishes_on_main() {
 
     git(&dir, &["add", "src/b.rs"]);
     assert!(commit(&dir, "bob", "bob: b").status.success());
+    let committed = hook(
+        &dir,
+        "bob",
+        "claude",
+        json!({"hook_event_name": "PostToolUse", "cwd": dir, "tool_name": "Bash",
+               "tool_input": {"command": "git add src/b.rs && git commit -m 'bob: b'"}}),
+    );
+    let nudge = String::from_utf8_lossy(&committed.stdout);
+    assert!(
+        nudge.contains("you're the last agent working")
+            && nudge.contains("before you write your final summary"),
+        "the commit itself tells bob to finish: {nudge}"
+    );
+    let waiting = hook(
+        &dir,
+        "bob",
+        "claude",
+        json!({"hook_event_name": "Stop", "cwd": dir,
+               "background_tasks": [{"id": "t1", "type": "shell", "status": "running"}]}),
+    );
+    assert_eq!(
+        waiting.status.code(),
+        Some(0),
+        "waiting on a background task isn't the end of bob's turn"
+    );
     let last = stop(&dir, "bob");
     assert_eq!(last.status.code(), Some(2));
     assert!(
