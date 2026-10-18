@@ -123,8 +123,8 @@ fn wake(
             false,
         )));
     }
-    let store = Store::open(cwd)?;
-    crate::policy::sleep(&store, agent, &plan, task)?;
+    let store = Store::open(cwd).ok();
+    crate::policy::sleep(store.as_ref(), agent, &plan, task)?;
     let start = now();
     let token = msg["params"]["_meta"]["progressToken"].clone();
     while now() < plan.until {
@@ -138,7 +138,9 @@ fn wake(
                 if other["method"] == "notifications/cancelled"
                     && other["params"]["requestId"] == msg["id"]
                 {
-                    store.log(&agent.id, "woke", "sleep cancelled".into())?;
+                    if let Some(store) = &store {
+                        store.log(&agent.id, "woke", "sleep cancelled".into())?;
+                    }
                     return Ok(None);
                 } else if other["method"] == "ping" {
                     send(&json!({"jsonrpc": "2.0", "id": other["id"], "result": {}}))?;
@@ -163,7 +165,7 @@ fn wake(
         }
     }
     Ok(Some((
-        crate::policy::woke(&store, agent, &plan, task)?,
+        crate::policy::woke(store.as_ref(), agent, &plan, task)?,
         true,
     )))
 }

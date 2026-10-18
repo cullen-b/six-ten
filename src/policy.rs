@@ -500,7 +500,11 @@ pub fn release_agent(store: &Store, me: &Agent, holder: &str) -> Result<Vec<Stri
 }
 
 /// Before a long sleep: free the agent's files so nobody waits on them, and say when it's back.
-pub fn sleep(store: &Store, agent: &Agent, plan: &crate::wake::Plan, task: &str) -> Result<()> {
+pub fn sleep(store: Option<&Store>, agent: &Agent, plan: &crate::wake::Plan, task: &str) -> Result<()> {
+    // Outside a git repo there are no claims to free; the sleep itself still works.
+    let Some(store) = store else {
+        return Ok(());
+    };
     store.mark_present(agent)?;
     store.release(&agent.id, None)?;
     let until = crate::wake::clock(plan.until, now(), crate::wake::local_offset(plan.until));
@@ -513,9 +517,11 @@ pub fn sleep(store: &Store, agent: &Agent, plan: &crate::wake::Plan, task: &str)
 }
 
 /// After the sleep: the reminder that tells the agent to start working.
-pub fn woke(store: &Store, agent: &Agent, plan: &crate::wake::Plan, task: &str) -> Result<String> {
-    store.mark_present(agent)?;
-    store.log(&agent.id, "woke", "woke up to start working".into())?;
+pub fn woke(store: Option<&Store>, agent: &Agent, plan: &crate::wake::Plan, task: &str) -> Result<String> {
+    if let Some(store) = store {
+        store.mark_present(agent)?;
+        store.log(&agent.id, "woke", "woke up to start working".into())?;
+    }
     Ok(crate::wake::reminder(plan, Some(task)))
 }
 
