@@ -1164,6 +1164,47 @@ fn wake_sleeps_then_tells_the_agent_to_start() {
 }
 
 #[test]
+fn wake_works_outside_a_git_repo() {
+    // A folder holding several repos, like a session opened in ~/code/sports.
+    let ceiling = std::env::temp_dir();
+    let dir = ceiling.join(format!("six-ten-e2e-norepo-{}", std::process::id()));
+    fs::create_dir_all(&dir).unwrap();
+    let mut child = Command::new(BIN)
+        .current_dir(&dir)
+        .env("SIX_TEN_AGENT", "claude:7")
+        .env("GIT_CEILING_DIRECTORIES", &ceiling)
+        .arg("mcp")
+        .stdin(Stdio::piped())
+        .stdout(Stdio::piped())
+        .spawn()
+        .unwrap();
+    let mut stdin = child.stdin.take().unwrap();
+    writeln!(
+        stdin,
+        "{}",
+        json!({"jsonrpc": "2.0", "id": 1, "method": "tools/call", "params": {"name": "six_ten_wake", "arguments": {"minutes": 0.02, "task": "run the test"}}})
+    )
+    .unwrap();
+    let mut lines = std::io::BufRead::lines(std::io::BufReader::new(child.stdout.take().unwrap()));
+    let reply: Value = serde_json::from_str(&lines.next().unwrap().unwrap()).unwrap();
+    drop(stdin);
+    child.wait().unwrap();
+    let text = reply["result"]["content"][0]["text"].as_str().unwrap();
+    assert_eq!(reply["result"]["isError"], false, "{text}");
+    assert!(text.ends_with("Start working now: run the test"), "{text}");
+    let out = Command::new(BIN)
+        .current_dir(&dir)
+        .env("SIX_TEN_AGENT", "claude:7")
+        .env("GIT_CEILING_DIRECTORIES", &ceiling)
+        .args(["wake", "--minutes", "0.02", "run the test"])
+        .output()
+        .unwrap();
+    let stdout = String::from_utf8_lossy(&out.stdout);
+    assert!(out.status.success(), "{}", String::from_utf8_lossy(&out.stderr));
+    assert!(stdout.trim_end().ends_with("Start working now: run the test"), "{stdout}");
+}
+
+#[test]
 fn wake_sends_cursor_to_the_shell_for_long_waits() {
     let dir = repo();
     let mut child = Command::new(BIN)

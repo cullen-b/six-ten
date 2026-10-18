@@ -149,6 +149,39 @@ fn run(command: Command) -> Result<u8> {
             println!("{}", agent.id);
             Ok(0)
         }
+        Command::Wake {
+            at,
+            minutes,
+            provider,
+            task,
+        } => {
+            // Waking doesn't need a repo: sessions started in a folder of repos can still sleep.
+            let store = Store::open(&cwd).ok();
+            let agent = Agent::current();
+            let agent = match &store {
+                Some(store) => store.resolve(agent),
+                None => agent,
+            };
+            let plan = match wake::plan(
+                store::harness_of(&agent.id),
+                at.as_deref(),
+                minutes,
+                provider.as_deref(),
+            ) {
+                Ok(plan) => plan,
+                Err(reason) => {
+                    eprintln!("{reason}");
+                    return Ok(2);
+                }
+            };
+            let task = task.join(" ");
+            policy::sleep(store.as_ref(), &agent, &plan, &task)?;
+            while now() < plan.until {
+                std::thread::sleep(Duration::from_secs((plan.until - now()).min(60)));
+            }
+            println!("{}", policy::woke(store.as_ref(), &agent, &plan, &task)?);
+            Ok(0)
+        }
         command => {
             let store = Store::open(&cwd)?;
             let agent = store.resolve(Agent::current());
@@ -205,32 +238,6 @@ fn run(command: Command) -> Result<u8> {
                     anyhow::ensure!(!text.is_empty(), "give the decision to record");
                     store.log(&agent.id, "decision", text.clone())?;
                     println!("recorded decision: {text}");
-                    Ok(0)
-                }
-                Command::Wake {
-                    at,
-                    minutes,
-                    provider,
-                    task,
-                } => {
-                    let plan = match wake::plan(
-                        store::harness_of(&agent.id),
-                        at.as_deref(),
-                        minutes,
-                        provider.as_deref(),
-                    ) {
-                        Ok(plan) => plan,
-                        Err(reason) => {
-                            eprintln!("{reason}");
-                            return Ok(2);
-                        }
-                    };
-                    let task = task.join(" ");
-                    policy::sleep(&store, &agent, &plan, &task)?;
-                    while now() < plan.until {
-                        std::thread::sleep(Duration::from_secs((plan.until - now()).min(60)));
-                    }
-                    println!("{}", policy::woke(&store, &agent, &plan, &task)?);
                     Ok(0)
                 }
                 Command::Status => {
