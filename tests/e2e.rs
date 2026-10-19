@@ -1998,6 +1998,15 @@ fn an_agents_commit_on_the_default_branch_starts_the_session_branch() {
     let dir = repo();
     git(&dir, &["switch", "-q", "-c", "main"]);
     edit_now(&dir, "alice", "src/a.rs", "a\nalice\n");
+    // A command that starts its own session keeps its topic.
+    let own = hook(
+        &dir,
+        "alice",
+        "claude",
+        bash(&dir, "six-ten session mine && git commit -m 'x'"),
+    );
+    assert!(!context(&own).contains("session branch"));
+    assert_eq!(out_text(&dir, &["branch", "--show-current"]), "main");
     let out = hook(
         &dir,
         "alice",
