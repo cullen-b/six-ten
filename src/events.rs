@@ -253,6 +253,7 @@ pub fn icon(kind: &str) -> &'static str {
         "released" => "🔓",
         "sleep" => "💤",
         "woke" => "⏰",
+        "unfinished" => "🚧",
         _ => "⚠️",
     }
 }
@@ -284,6 +285,78 @@ fn desktop_notify(event: &Event) {
             .spawn()
     };
     drop(child);
+}
+
+/// Per-repository counts of what six-ten did, read from each event log.
+pub fn stats_text(stores: &[Store]) -> String {
+    if stores.is_empty() {
+        return "no six-ten event logs here: run it inside a repository, or in a folder of them\n"
+            .into();
+    }
+    let mut out = String::new();
+    for store in stores {
+        let events = store.events();
+        let Some(first) = events.first() else {
+            out.push_str(&format!("{}: no events yet\n", store.root().display()));
+            continue;
+        };
+        let count = |kind: &str, needle: &str| {
+            events
+                .iter()
+                .filter(|e| e.kind == kind && e.text.contains(needle))
+                .count()
+        };
+        let agents: BTreeSet<&str> = events.iter().map(|e| e.agent.as_str()).collect();
+        let mut waits: Vec<u64> = events
+            .iter()
+            .filter(|e| e.kind == "resolved" && e.text.starts_with("got "))
+            .filter_map(|e| wait_secs(&e.text))
+            .collect();
+        waits.sort();
+        let median = waits
+            .get(waits.len() / 2)
+            .map_or(String::new(), |w| format!(" (median wait {})", human(*w)));
+        let days = now().saturating_sub(first.at).div_ceil(24 * 60 * 60).max(1);
+        out.push_str(&format!(
+            "{} (last {days} day(s), {} agent(s))\n\
+             \x20 blocked on a file another agent held: {}; got it later: {}{median}; gave up: {}\n\
+             \x20 writes stopped because the file changed since it was read: {}\n\
+             \x20 refused: {} command(s) that would discard others' work, {} branch switch(es), {} worktree(s), \
+             {} commit(s) on the default branch, {} commit(s) sweeping in others' work\n\
+             \x20 session branches started: {}; merged by finish: {}; finish stopped partway: {}\n\
+             \x20 stalled agents released: {}; decisions recorded: {}\n",
+            store.root().display(),
+            agents.len(),
+            count("blocked", ""),
+            waits.len(),
+            count("unresolved", ""),
+            count("stale", ""),
+            count("refused", "would rewrite"),
+            count("refused", "share the session branch"),
+            count("refused", "share one checkout"),
+            count("refused", "agents commit on a session branch"),
+            count("refused", "commit refused, it included"),
+            count("session", ""),
+            count("finish", "merged"),
+            count("unfinished", ""),
+            count("released", ""),
+            count("decision", ""),
+        ));
+    }
+    out
+}
+
+/// Seconds in a resolved block's "got <path> after 3m (...)" text.
+fn wait_secs(text: &str) -> Option<u64> {
+    let (_, rest) = text.split_once(" after ")?;
+    let span = rest.split_whitespace().next()?;
+    let (n, unit) = span.split_at(span.find(|c: char| !c.is_ascii_digit())?);
+    let n: u64 = n.parse().ok()?;
+    match unit {
+        "s" => Some(n),
+        "m" => Some(n * 60),
+        _ => None,
+    }
 }
 
 /// Prints recent events, then follows the log until interrupted.

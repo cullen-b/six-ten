@@ -8,7 +8,7 @@ use serde_json::{Value, json};
 
 const BIN: &str = env!("CARGO_BIN_EXE_six-ten");
 
-fn repo() -> PathBuf {
+fn scratch() -> PathBuf {
     static N: AtomicU32 = AtomicU32::new(0);
     let dir = std::env::temp_dir().join(format!(
         "six-ten-e2e-{}-{}",
@@ -16,6 +16,14 @@ fn repo() -> PathBuf {
         N.fetch_add(1, Ordering::SeqCst)
     ));
     let _ = fs::remove_dir_all(&dir);
+    dir
+}
+
+fn repo() -> PathBuf {
+    repo_at(scratch())
+}
+
+fn repo_at(dir: PathBuf) -> PathBuf {
     fs::create_dir_all(dir.join("src")).unwrap();
     git(&dir, &["init", "-q", "-b", "dev"]);
     fs::write(dir.join("src/a.rs"), "a\n").unwrap();
@@ -1852,4 +1860,209 @@ fn commands_in_codexs_sandbox_resolve_to_the_codex_agent() {
     };
     assert_eq!(whoami("sess-1"), "codex:77");
     assert_eq!(whoami("unknown"), "pid:5");
+}
+
+/// A folder holding repositories `one` and `two`, like a session opened in `~/code`.
+fn folder() -> (PathBuf, PathBuf, PathBuf) {
+    let top = scratch();
+    let one = repo_at(top.join("one"));
+    let two = repo_at(top.join("two"));
+    (top, one, two)
+}
+
+fn mcp_calls(dir: &Path, agent: &str, calls: &[Value]) -> Vec<Value> {
+    let mut child = Command::new(BIN)
+        .current_dir(dir)
+        .env("SIX_TEN_AGENT", agent)
+        .arg("mcp")
+        .stdin(Stdio::piped())
+        .stdout(Stdio::piped())
+        .spawn()
+        .unwrap();
+    let mut stdin = child.stdin.take().unwrap();
+    for (i, call) in calls.iter().enumerate() {
+        let msg = json!({"jsonrpc": "2.0", "id": i + 1, "method": "tools/call", "params": call});
+        writeln!(stdin, "{msg}").unwrap();
+    }
+    drop(stdin);
+    let out = child.wait_with_output().unwrap();
+    String::from_utf8(out.stdout)
+        .unwrap()
+        .lines()
+        .map(|l| serde_json::from_str::<Value>(l).unwrap()["result"].clone())
+        .collect()
+}
+
+fn text_of(result: &Value) -> String {
+    result["content"][0]["text"].as_str().unwrap().to_string()
+}
+
+#[test]
+fn a_session_in_a_folder_of_repos_is_coordinated_in_each_repo() {
+    let (top, one, _two) = folder();
+    let (alice, bob) = (
+        format!("alice-{}", std::process::id()),
+        format!("bob-{}", std::process::id()),
+    );
+    // Both agents run from the folder; each edit is claimed in the repository it lands in.
+    let edit = |agent: &str, file: &str| {
+        hook(
+            &top,
+            agent,
+            "claude",
+            json!({"hook_event_name": "PreToolUse", "tool_name": "Edit",
+            "cwd": top, "tool_input": {"file_path": top.join(file)}}),
+        )
+    };
+    assert_eq!(edit(&alice, "one/src/a.rs").status.code(), Some(0));
+    fs::write(one.join("src/a.rs"), "a\nalice\n").unwrap();
+    hook(
+        &top,
+        &alice,
+        "claude",
+        json!({"hook_event_name": "PostToolUse", "tool_name": "Edit",
+        "cwd": top, "tool_input": {"file_path": top.join("one/src/a.rs")}}),
+    );
+    let blocked = edit(&bob, "one/src/a.rs");
+    assert_eq!(blocked.status.code(), Some(2));
+    assert!(stderr(&blocked).contains(&alice), "{}", stderr(&blocked));
+    assert_eq!(
+        edit(&bob, "two/src/a.rs").status.code(),
+        Some(0),
+        "another repo is free"
+    );
+
+    // The MCP server launched in the folder works too: claims route by path, status covers both repos.
+    let results = mcp_calls(
+        &top,
+        &bob,
+        &[
+            json!({"name": "six_ten_claim", "arguments": {"paths": ["one/src/b.rs"]}}),
+            json!({"name": "six_ten_status", "arguments": {}}),
+            json!({"name": "six_ten_claim", "arguments": {"paths": ["notes.txt"]}}),
+        ],
+    );
+    assert_eq!(results[0]["isError"], false, "{}", text_of(&results[0]));
+    let status = text_of(&results[1]);
+    assert!(
+        status.contains("/one ==") && status.contains("/two ==") && status.contains("src/b.rs"),
+        "{status}"
+    );
+    assert!(text_of(&results[2]).contains("outside every git repository"));
+
+    // Alice's turn ends in the folder: she is sent back to commit in `one`, then her files free up.
+    let stop = json!({"hook_event_name": "Stop", "cwd": top});
+    let reminded = hook(&top, &alice, "claude", stop.clone());
+    assert_eq!(reminded.status.code(), Some(2));
+    assert!(
+        stderr(&reminded).contains("src/a.rs"),
+        "{}",
+        stderr(&reminded)
+    );
+    assert_eq!(hook(&top, &alice, "claude", stop).status.code(), Some(0));
+    assert_eq!(edit(&bob, "one/src/a.rs").status.code(), Some(0));
+
+    // CLI commands that need one repository name the candidates.
+    let lost = six(&top, &bob, &["session", "x"]);
+    assert!(
+        stderr(&lost).contains("cd <repo>") && stderr(&lost).contains("/one"),
+        "{}",
+        stderr(&lost)
+    );
+}
+
+#[test]
+fn shell_commands_are_checked_in_the_repo_they_cd_into() {
+    let (top, one, _two) = folder();
+    let carol = format!("carol-{}", std::process::id());
+    six(&one, "dave", &["claim", "src/a.rs"]);
+    let out = hook(
+        &top,
+        &carol,
+        "claude",
+        bash(&top, "cd one && echo x > src/a.rs"),
+    );
+    assert_eq!(out.status.code(), Some(2), "{}", stderr(&out));
+    assert!(stderr(&out).contains("dave"));
+    let out = hook(&top, &carol, "claude", bash(&top, "cd one && git stash"));
+    assert_eq!(out.status.code(), Some(2), "{}", stderr(&out));
+}
+
+#[test]
+fn an_agents_commit_on_the_default_branch_starts_the_session_branch() {
+    let dir = repo();
+    git(&dir, &["switch", "-q", "-c", "main"]);
+    edit_now(&dir, "alice", "src/a.rs", "a\nalice\n");
+    let out = hook(
+        &dir,
+        "alice",
+        "claude",
+        bash(
+            &dir,
+            "git add src/a.rs && git commit -m \"$(cat <<'EOF'\nFix the auth flow\n\nDetails.\nEOF\n)\"",
+        ),
+    );
+    assert_eq!(out.status.code(), Some(0), "{}", stderr(&out));
+    assert!(
+        context(&out).contains("goes on the session branch"),
+        "{}",
+        context(&out)
+    );
+    let branch = out_text(&dir, &["branch", "--show-current"]);
+    assert!(
+        branch.starts_with("agents/") && branch.ends_with("-fix-the-auth-flow"),
+        "{branch}"
+    );
+    git(&dir, &["add", "src/a.rs"]);
+    assert!(commit(&dir, "alice", "Fix the auth flow").status.success());
+    // Already on the session branch: nothing more happens.
+    let again = hook(&dir, "alice", "claude", bash(&dir, "git commit -m 'more'"));
+    assert!(!context(&again).contains("session branch"));
+}
+
+#[test]
+fn finish_creates_the_default_branch_in_a_new_repo() {
+    let dir = scratch();
+    fs::create_dir_all(&dir).unwrap();
+    git(&dir, &["init", "-q", "-b", "main"]);
+    six(&dir, "alice", &["session", "first"]);
+    fs::write(dir.join("a.txt"), "a\n").unwrap();
+    git(&dir, &["add", "a.txt"]);
+    assert!(commit(&dir, "alice", "first").status.success());
+    let out = six(&dir, "alice", &["finish"]);
+    assert_eq!(out.status.code(), Some(0), "{}", stderr(&out));
+    assert!(String::from_utf8_lossy(&out.stdout).contains("created `main`"));
+    assert_eq!(out_text(&dir, &["branch", "--show-current"]), "main");
+    assert_eq!(out_text(&dir, &["log", "-1", "--format=%s"]), "first");
+}
+
+#[test]
+fn finish_stops_before_switching_when_unattributed_changes_would_be_overwritten() {
+    let dir = repo();
+    git(&dir, &["switch", "-q", "-c", "main"]);
+    six(&dir, "alice", &["session", "x"]);
+    fs::write(dir.join("src/b.rs"), "b\nbranch\n").unwrap();
+    git(&dir, &["add", "src/b.rs"]);
+    assert!(commit(&dir, "alice", "b on the branch").status.success());
+    // Someone edits that file again outside six-ten's hooks.
+    fs::write(dir.join("src/b.rs"), "b\nhuman\n").unwrap();
+    let branch = out_text(&dir, &["branch", "--show-current"]);
+    let out = six(&dir, "alice", &["finish"]);
+    assert_eq!(out.status.code(), Some(2));
+    assert!(
+        stderr(&out).contains("can't attribute") && stderr(&out).contains("src/b.rs"),
+        "{}",
+        stderr(&out)
+    );
+    assert_eq!(out_text(&dir, &["branch", "--show-current"]), branch);
+    assert_eq!(
+        fs::read_to_string(dir.join("src/b.rs")).unwrap(),
+        "b\nhuman\n"
+    );
+    let stats = String::from_utf8(six(&dir, "alice", &["stats"]).stdout).unwrap();
+    assert!(
+        stats.contains("session branches started: 1")
+            && stats.contains("finish stopped partway: 1"),
+        "{stats}"
+    );
 }

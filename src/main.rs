@@ -6,6 +6,7 @@ mod install;
 mod journal;
 mod mcp;
 mod policy;
+mod repos;
 mod store;
 mod wake;
 
@@ -58,6 +59,8 @@ enum Command {
     Decide { text: Vec<String> },
     /// Show who is editing what.
     Status,
+    /// Count what six-ten did here (blocks and how they ended, refusals, finishes) from its event log.
+    Stats,
     /// Sleep until a time or your usage limit's reset, then print a reminder to start working.
     Wake {
         /// Local clock time ("2:30am", "14:05"), RFC 3339, or Unix seconds.
@@ -182,8 +185,18 @@ fn run(command: Command) -> Result<u8> {
             println!("{}", policy::woke(store.as_ref(), &agent, &plan, &task)?);
             Ok(0)
         }
+        Command::Stats => {
+            print!("{}", events::stats_text(&repos::here_or_nearby(&cwd)));
+            Ok(0)
+        }
         command => {
-            let store = Store::open(&cwd)?;
+            let store = Store::open(&cwd).map_err(|_| {
+                repos::not_a_repo(
+                    &cwd,
+                    &Agent::current().id,
+                    "Run six-ten from inside the repository you mean: `cd <repo> && six-ten ...`.",
+                )
+            })?;
             let agent = store.resolve(Agent::current());
             match command {
                 Command::Claim { paths, reason } => Ok(decided(
