@@ -187,7 +187,13 @@ pub fn handle(harness: &str, payload: &Value) -> Result<Decision> {
             }
             if harness != "hermes" && crate::git::commits(&command) {
                 if let Some(store) = &here {
-                    out = policy::finish_nudge(store, &agent, out)?;
+                    let elsewhere = Store::open(&cwd).map_or(true, |s| s.root() != store.root());
+                    let nudge = policy::finish_nudge(store, &agent, Decision::Allow)?;
+                    out = out.and(if elsewhere {
+                        located(nudge, store.root())
+                    } else {
+                        nudge
+                    });
                 }
             }
         }
@@ -198,18 +204,37 @@ pub fn handle(harness: &str, payload: &Value) -> Result<Decision> {
                 if is_here {
                     enter(&store)?;
                 }
-                out = out.and(match event {
+                let decision = match event {
                     Event::TurnStart => policy::turn_start(&store, &agent)?,
                     Event::Stop if is_here || !store.touched_by(&agent.id)?.is_empty() => {
                         policy::stop(&store, &agent)?
                     }
                     _ => policy::end(&store, &agent).map(|_| Decision::Allow)?,
+                };
+                out = out.and(if is_here {
+                    decision
+                } else {
+                    located(decision, store.root())
                 });
             }
         }
         Event::Ignore => {}
     }
     Ok(out)
+}
+
+/// Names the repository a message is about, for an agent whose cwd is somewhere else.
+fn located(decision: Decision, root: &Path) -> Decision {
+    let at = |text: String| {
+        let root = root.display();
+        format!("In {root} (run its git and six-ten commands there: `cd {root} && ...`):\n{text}")
+    };
+    match decision {
+        Decision::Allow => Decision::Allow,
+        Decision::Note(t) => Decision::Note(at(t)),
+        Decision::Stale(t) => Decision::Stale(at(t)),
+        Decision::Deny(t) => Decision::Deny(at(t)),
+    }
 }
 
 /// Where a shell command runs: the directory of a leading `cd <dir>`, else `cwd`.
@@ -576,6 +601,17 @@ mod tests {
         );
         assert!(shell_writes("git commit -m 'fix -> thing' && ls -la").is_empty());
         assert!(shell_writes("grep -r foo src").is_empty());
+        assert_eq!(
+            shell_writes("sqlite3 db \"select 1\nwhere ts > strftime('%s')\" > out.txt"),
+            vec!["out.txt"],
+            "a quote spanning lines hides its `>`"
+        );
+        assert_eq!(
+            shell_writes(
+                "git commit -m \"$(cat <<'EOF'\nsay \"x > y\"\nEOF\n)\" && echo > log.txt"
+            ),
+            vec!["log.txt"]
+        );
     }
 
     #[test]

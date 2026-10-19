@@ -317,6 +317,40 @@ pub fn stats_text(stores: &[Store]) -> String {
             .get(waits.len() / 2)
             .map_or(String::new(), |w| format!(" (median wait {})", human(*w)));
         let days = now().saturating_sub(first.at).div_ceil(24 * 60 * 60).max(1);
+        // Files agents keep colliding on: blocks plus commits refused for sweeping them in.
+        let mut contended: std::collections::BTreeMap<&str, usize> = Default::default();
+        for e in &events {
+            let paths: Vec<&str> = match e.kind.as_str() {
+                "blocked" => e
+                    .text
+                    .strip_prefix("blocked on ")
+                    .and_then(|t| t.split(" (held").next())
+                    .into_iter()
+                    .collect(),
+                "refused" => e
+                    .text
+                    .strip_prefix("commit refused, it included: ")
+                    .map_or(Vec::new(), |t| {
+                        t.split(", ").filter_map(|p| p.split(" (").next()).collect()
+                    }),
+                _ => Vec::new(),
+            };
+            for p in paths {
+                *contended.entry(p).or_default() += 1;
+            }
+        }
+        let mut hot: Vec<(&str, usize)> = contended.into_iter().collect();
+        hot.sort_by_key(|(p, n)| (std::cmp::Reverse(*n), *p));
+        let hot: Vec<String> = hot
+            .iter()
+            .take(3)
+            .map(|(p, n)| format!("{p} ({n})"))
+            .collect();
+        let hot = if hot.is_empty() {
+            String::new()
+        } else {
+            format!("  most contended files: {}\n", hot.join(", "))
+        };
         out.push_str(&format!(
             "{} (last {days} day(s), {} agent(s))\n\
              \x20 blocked on a file another agent held: {}; got it later: {}{median}; gave up: {}\n\
@@ -324,7 +358,7 @@ pub fn stats_text(stores: &[Store]) -> String {
              \x20 refused: {} command(s) that would discard others' work, {} branch switch(es), {} worktree(s), \
              {} commit(s) on the default branch, {} commit(s) sweeping in others' work\n\
              \x20 session branches started: {}; merged by finish: {}; finish stopped partway: {}\n\
-             \x20 stalled agents released: {}; decisions recorded: {}\n",
+             \x20 stalled agents released: {}; decisions recorded: {}\n{hot}",
             store.root().display(),
             agents.len(),
             count("blocked", ""),

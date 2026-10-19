@@ -264,6 +264,8 @@ pub enum Clobber {
 pub fn skeleton(command: &str) -> String {
     let mut out = String::new();
     let mut heredoc: Option<String> = None;
+    // Quotes can span lines (multi-line SQL or Python strings), so the state carries over.
+    let mut quote: Option<char> = None;
     for line in command.lines() {
         if let Some(end) = &heredoc {
             if line.trim() == end {
@@ -271,7 +273,6 @@ pub fn skeleton(command: &str) -> String {
             }
             continue;
         }
-        let mut quote: Option<char> = None;
         for c in line.chars() {
             match quote {
                 Some(q) if c == q => {

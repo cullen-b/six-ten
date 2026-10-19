@@ -24,7 +24,9 @@ Several agents may share this checkout; six-ten keeps you from colliding.
 - Notes from six-ten are diffs of other agents' changes: account for them; re-read only when told to.
 - One checkout, one branch: never create worktrees or create/switch branches yourself. Before your
   first commit, run `six-ten session <topic>`: it starts today's session branch, or reuses the one
-  in use.
+  in use (a commit on `main` starts it for you).
+- Started in a folder of repositories? Each edit is coordinated in its own repository; run git and
+  six-ten commands inside the repository they're about (`cd <repo> && six-ten finish`).
 - Commit your own finished files before your turn ends: `git add <paths>` and commit, never
   `git add -A` or `commit -a`. Work an agent left uncommitted after its turn ended is yours to
   commit. `Agent:` / `Co-edited-by:` trailers are added for you.

@@ -4,8 +4,8 @@
 
 # six-ten
 
-**Keep your agents in their lanes.** Run as many coding agents as you like in one repo, without them
-stepping on each other's toes.
+**Keep your agents in their lanes.** Run as many coding agents as you like in one repo, or across a
+whole folder of repos, without them stepping on each other's toes.
 
 six-ten is a small Rust binary that sits between your agents and your working tree. Before an agent
 edits a file, six-ten checks whether another agent is already editing it. If it is, the agent is told
@@ -52,7 +52,7 @@ Separate worktrees avoid all of this by giving up on sharing a checkout. six-ten
 | **Commit guard** | A pre-commit check refuses commits that include files another agent is editing or has left uncommitted. |
 | **Wake on reset** | `six_ten_wake` (CLI: `six-ten wake`) puts an agent to sleep until a time or until your Claude Code or Codex usage window resets, then tells it to start working. See [Starting work when your usage resets](#starting-work-when-your-usage-resets). |
 | **Folders of repos** | An agent started in a folder that holds several repositories (`~/code`), or in a scratch directory, is still coordinated. Each edit is claimed in the repository it lands in, a shell command is checked in the repository it `cd`s into, and turn-end reminders and releases cover every repository the agent worked in. The MCP tools route the same way. |
-| **Visibility** | `six-ten watch` shows a live feed of blocks, how they were resolved, and refusals. `six-ten stats` counts them: blocks and how they ended, refusals by kind, sessions, finishes. `six-ten notify on` sends desktop notifications. |
+| **Visibility** | `six-ten watch` shows a live feed of blocks, how they were resolved, and refusals. `six-ten stats` counts them: blocks and how they ended, refusals by kind, sessions, finishes, and the files agents collide on most. `six-ten notify on` sends desktop notifications. |
 
 ## Quick start
 
@@ -98,6 +98,7 @@ Then start your agents as usual. There's nothing to run in the background.
 ```sh
 six-ten watch            # live feed of what agents are doing
 six-ten status           # who is editing what, uncommitted work, recent events
+six-ten stats            # what six-ten has done: blocks, refusals, merges, most contended files
 ```
 
 ### Check that it works
@@ -120,7 +121,8 @@ SIX_TEN_AGENT=a six-ten release
 | **git** | Commit-time | `pre-commit` hook running `six-ten precommit` | None: it installs itself in each repo the first time an agent works there. It's the backstop for every harness |
 
 Verified live with Claude Code 2.1.285, Codex 0.159, OpenCode 1.18 and Hermes 0.21, including all of
-them running at once against one file.
+them running at once against one file. Sessions started in a folder of repos were verified live with
+Claude Code 2.1.303.
 
 **The Codex sandbox profile.** Codex keeps `.git` read-only, which stops agents from committing. The
 installed `six-ten` profile makes `.git` writable but keeps `.git/hooks` and `.git/config` read-only.
@@ -250,7 +252,10 @@ at about 1,500 tokens.
 - **Fewer tool calls for hooked harnesses.** When a harness's hooks already claim edits, its MCP server
   hides `six_ten_claim` and tells the agent to just edit. In live runs this cut Codex from 4–6 six-ten
   calls per task to 1.
-- **Fail-open.** If six-ten errors, or the directory isn't a git repo, the edit goes ahead. A broken
+- **Works from anywhere.** Hooks and MCP calls find the repository from each file's path, not the
+  agent's directory, so an agent started in `~/code` or a scratch directory is coordinated in every
+  repo it touches. Turn-end reminders name the repo they're about.
+- **Fail-open.** If six-ten errors, or the file isn't in any git repo, the edit goes ahead. A broken
   coordinator never wedges an agent.
 
 ## Token cost
@@ -259,7 +264,7 @@ Measured, at roughly 4 characters per token:
 
 | | When | Tokens |
 |---|---|---|
-| Protocol section in `AGENTS.md` / `CLAUDE.md` | per session (usually cached) | ~500 |
+| Protocol section in `AGENTS.md` / `CLAUDE.md` | per session (usually cached) | ~550 |
 | MCP instructions + tool definitions | per session (some harnesses load them on demand) | ~370–420 |
 | Allowed edit | every tool call | **0**: hooks print nothing |
 | "File is held" refusal | per block | ~70, plus one extra model round trip |
@@ -279,6 +284,8 @@ broken merge.
 | Headless Claude (`claude -p`) can't call `six_ten_wait` | The workspace isn't trusted, so project permissions are ignored. Open it interactively once, or use `--global` |
 | Hooks never fire | `six-ten` isn't on PATH for that app. Apps started from a GUI may not see `~/.cargo/bin` |
 | An agent shows up as `python3:…` or `node:…` | Its launcher hides the harness name. Set `SIX_TEN_AGENT` for a stable id |
+| `not inside a git repository` | A CLI command that needs one repo (`session`, `finish`, `decide`) ran in a folder of repos. Run it as `cd <repo> && six-ten …`; the error lists the candidates. MCP tools take a `repo` argument instead |
+| `six-ten finish` says it "can't attribute" changes | Someone edited files outside six-ten's hooks, and merging would overwrite them. Commit or discard those files, then run it again |
 | A lease is stuck | Leases expire after 10 idle minutes, and dead processes don't hold leases. `six-ten status` shows who holds what; `six-ten gc` cleans up |
 
 ## Uninstall
