@@ -99,6 +99,9 @@ pub fn handle(harness: &str, payload: &Value) -> Result<Decision> {
         None => base.clone(),
     };
     let session = text(&payload["session_id"]).filter(|_| harness == "codex");
+    // Find the agent's chat thread once, so agents it blocks can ask it to let go.
+    let harness_session = text(&payload["session_id"]).or_else(|| text(&payload["sessionID"]));
+    let _ = crate::contact::detect(&base.id, harness_session.as_deref());
     // Each repository the event touches is coordinated on its own; outside every one, nothing is.
     let enter = |store: &Store| -> Result<()> {
         if let Some(session) = &session {
@@ -143,7 +146,7 @@ pub fn handle(harness: &str, payload: &Value) -> Result<Decision> {
                 refused => return Ok(refused),
             }
             if crate::git::commits(&command) {
-                out = out.and(policy::session_for_commit(&store, &agent, &command)?);
+                out = out.and(policy::session_for_commit(&store, &agent)?);
             }
         }
         Event::PostWrite(paths) | Event::PostRead(paths) => {

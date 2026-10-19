@@ -221,6 +221,28 @@ fn respond(cwd: &Path, agent: &Agent, msg: &Value) -> Result<Value, (i64, String
 }
 
 fn call(cwd: &Path, agent: &Agent, name: &str, args: &Value) -> Result<(String, bool)> {
+    let _ = crate::contact::detect(&agent.id, None);
+    if name == "six_ten_contact" {
+        let thread = args["thread"].as_str().unwrap_or_default().trim();
+        if thread.is_empty() {
+            return Ok(("give your thread id".into(), false));
+        }
+        let app = args["app"]
+            .as_str()
+            .filter(|a| !a.is_empty())
+            .unwrap_or("t3");
+        crate::contact::save(
+            &agent.id,
+            &crate::contact::Contact {
+                app: app.into(),
+                thread: thread.into(),
+            },
+        )?;
+        return Ok((
+            format!("recorded: agents you block can message your {app} thread {thread}"),
+            true,
+        ));
+    }
     let paths: Vec<String> = args["paths"]
         .as_array()
         .map(|a| {
@@ -373,6 +395,11 @@ fn tools(hooked: bool) -> Value {
                 "provider": {"type": "string", "enum": ["claude", "codex"], "description": "Whose usage reset to wait for; default: your harness"},
                 "task": {"type": "string", "description": "What to work on after waking; repeated back to you"},
             }},
+        }),
+        json!({
+            "name": "six_ten_contact",
+            "description": "Tell six-ten your chat thread id (e.g. your T3 Code thread) when six_ten_status says it doesn't know it, so agents you block can ask you to release a file.",
+            "inputSchema": {"type": "object", "properties": {"thread": {"type": "string", "description": "Your thread id"}, "app": {"type": "string", "description": "App the thread lives in; default t3"}}, "required": ["thread"]},
         }),
         json!({
             "name": "six_ten_decide",

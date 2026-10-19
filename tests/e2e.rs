@@ -443,7 +443,7 @@ fn mcp_server_speaks_json_rpc() {
         .collect();
     assert_eq!(replies.len(), 5, "notification gets no reply");
     assert_eq!(replies[0]["result"]["serverInfo"]["name"], "six-ten");
-    assert_eq!(replies[1]["result"]["tools"].as_array().unwrap().len(), 6);
+    assert_eq!(replies[1]["result"]["tools"].as_array().unwrap().len(), 7);
     assert_eq!(replies[2]["result"]["isError"], true);
     assert!(
         replies[2]["result"]["content"][0]["text"]
@@ -956,12 +956,17 @@ fn events_explain_blocks_and_how_they_were_resolved() {
             .code(),
         Some(2)
     );
-    hook(
-        &dir,
-        "carol",
-        "claude",
-        json!({"hook_event_name": "Stop", "cwd": dir}),
+    // Her first stop sends her back to the file once; the second ends her turn.
+    let stop = json!({"hook_event_name": "Stop", "cwd": dir});
+    let back = hook(&dir, "carol", "claude", stop.clone());
+    assert_eq!(back.status.code(), Some(2));
+    assert!(
+        stderr(&back).contains("come back to them")
+            && stderr(&back).contains("src/a.rs (held by bob)"),
+        "{}",
+        stderr(&back)
     );
+    assert_eq!(hook(&dir, "carol", "claude", stop).status.code(), Some(0));
     fs::write(dir.join("src/b.rs"), "bob's work\n").unwrap();
     assert_eq!(
         hook(&dir, "carol", "claude", bash(&dir, "git stash"))
@@ -974,7 +979,14 @@ fn events_explain_blocks_and_how_they_were_resolved() {
     let kinds: Vec<&str> = log.iter().map(|e| e["kind"].as_str().unwrap()).collect();
     assert_eq!(
         kinds,
-        ["blocked", "resolved", "blocked", "unresolved", "refused"],
+        [
+            "blocked",
+            "resolved",
+            "blocked",
+            "reminded",
+            "unresolved",
+            "refused"
+        ],
         "{log:#?}"
     );
     let resolved = log[1]["text"].as_str().unwrap();
@@ -985,15 +997,15 @@ fn events_explain_blocks_and_how_they_were_resolved() {
         "{resolved}"
     );
     assert!(
-        log[3]["text"]
+        log[4]["text"]
             .as_str()
             .unwrap()
             .contains("without editing src/a.rs (held by bob)")
     );
-    assert!(log[4]["text"].as_str().unwrap().contains("`git stash`"));
+    assert!(log[5]["text"].as_str().unwrap().contains("`git stash`"));
     let status = String::from_utf8(six(&dir, "dave", &["status"]).stdout).unwrap();
     assert!(
-        status.contains("recent:") && status.contains("✅ bob"),
+        status.contains("recent:") && status.contains("⛔ carol") && !status.contains("✅ bob"),
         "{status}"
     );
     assert!(
@@ -1103,6 +1115,7 @@ fn mcp_drops_claim_for_harnesses_whose_hooks_claim_edits() {
             "six_ten_release",
             "six_ten_status",
             "six_ten_wake",
+            "six_ten_contact",
             "six_ten_decide"
         ]
     );
@@ -1387,7 +1400,7 @@ fn global_install_keeps_existing_user_config() {
     )
     .unwrap();
     let reply: Value = serde_json::from_slice(&child.wait_with_output().unwrap().stdout).unwrap();
-    assert_eq!(reply["result"]["tools"].as_array().unwrap().len(), 5);
+    assert_eq!(reply["result"]["tools"].as_array().unwrap().len(), 6);
 }
 
 #[test]
@@ -1569,7 +1582,7 @@ fn agents_commit_on_one_session_branch_started_by_whoever_is_first() {
     let refused = commit(&dir, "alice", "alice: a");
     assert!(!refused.status.success());
     assert!(
-        stderr(&refused).contains("six-ten session <topic>"),
+        stderr(&refused).contains("six-ten session`"),
         "{}",
         stderr(&refused)
     );
@@ -1604,7 +1617,7 @@ fn agents_commit_on_one_session_branch_started_by_whoever_is_first() {
     )
     .unwrap();
     assert!(
-        branch.trim().starts_with("agents/") && branch.trim().ends_with("-auth-flow"),
+        branch.trim().len() == "agents/2026-01-01".len() && branch.trim().starts_with("agents/20"),
         "{branch}"
     );
     assert_eq!(
@@ -1745,7 +1758,10 @@ fn turn_end_asks_for_commits_and_the_last_agent_finishes_on_main() {
     // The day's next session continues the first one's name.
     let next =
         String::from_utf8(six(&dir, "carol", &["session", "something else"]).stdout).unwrap();
-    assert!(next.contains("-data.2"), "{next}");
+    assert!(
+        next.contains("started session branch agents/20") && next.contains(".2;"),
+        "{next}"
+    );
 }
 
 #[test]
@@ -1998,15 +2014,6 @@ fn an_agents_commit_on_the_default_branch_starts_the_session_branch() {
     let dir = repo();
     git(&dir, &["switch", "-q", "-c", "main"]);
     edit_now(&dir, "alice", "src/a.rs", "a\nalice\n");
-    // A command that starts its own session keeps its topic.
-    let own = hook(
-        &dir,
-        "alice",
-        "claude",
-        bash(&dir, "six-ten session mine && git commit -m 'x'"),
-    );
-    assert!(!context(&own).contains("session branch"));
-    assert_eq!(out_text(&dir, &["branch", "--show-current"]), "main");
     let out = hook(
         &dir,
         "alice",
@@ -2024,7 +2031,7 @@ fn an_agents_commit_on_the_default_branch_starts_the_session_branch() {
     );
     let branch = out_text(&dir, &["branch", "--show-current"]);
     assert!(
-        branch.starts_with("agents/") && branch.ends_with("-fix-the-auth-flow"),
+        branch.starts_with("agents/20") && !branch.contains("auth"),
         "{branch}"
     );
     git(&dir, &["add", "src/a.rs"]);
@@ -2079,4 +2086,74 @@ fn finish_stops_before_switching_when_unattributed_changes_would_be_overwritten(
             && stats.contains("finish stopped partway: 1"),
         "{stats}"
     );
+}
+
+#[test]
+fn blocked_agents_are_told_how_to_reach_the_holders_thread() {
+    let dir = repo();
+    let holder = format!("t3holder-{}", std::process::id());
+    // T3 Code logs each thread as events.<thread>.log, opening with the provider session id.
+    let home = dir.with_extension("home");
+    let logs = home.join(".t3/userdata/logs/provider");
+    fs::create_dir_all(&logs).unwrap();
+    fs::write(
+        logs.join("events.thread-42.log"),
+        "[t] {\"payload\":{\"sessionId\":\"sess-9\",\"cwd\":\"/x\"}}\n",
+    )
+    .unwrap();
+    let mut child = Command::new(BIN)
+        .current_dir(&dir)
+        .env("SIX_TEN_AGENT", &holder)
+        .env("HOME", &home)
+        .args(["hook", "claude"])
+        .stdin(Stdio::piped())
+        .stdout(Stdio::piped())
+        .stderr(Stdio::piped())
+        .spawn()
+        .unwrap();
+    let mut payload = edit(&dir, "src/a.rs");
+    payload["session_id"] = json!("sess-9");
+    child
+        .stdin
+        .take()
+        .unwrap()
+        .write_all(payload.to_string().as_bytes())
+        .unwrap();
+    assert_eq!(child.wait_with_output().unwrap().status.code(), Some(0));
+
+    let blocked = hook(&dir, "bob", "claude", edit(&dir, "src/a.rs"));
+    let msg = stderr(&blocked);
+    assert!(
+        msg.contains("T3 Code thread thread-42")
+            && msg.contains("t3_thread_send")
+            && msg.contains("bob is waiting for `src/a.rs`")
+            && msg.contains("last active"),
+        "{msg}"
+    );
+
+    // An agent can also record its thread itself.
+    let named = format!("named-{}", std::process::id());
+    six(&dir, &named, &["claim", "src/b.rs"]);
+    six(&dir, &named, &["contact", "thread-7"]);
+    let msg = stderr(&six(&dir, "bob", &["claim", "src/b.rs"]));
+    assert!(msg.contains("T3 Code thread thread-7"), "{msg}");
+}
+
+#[test]
+fn finish_lists_the_sessions_commits_in_the_merge() {
+    let dir = repo();
+    git(&dir, &["switch", "-q", "-c", "main"]);
+    six(&dir, "alice", &["session"]);
+    edit_now(&dir, "alice", "src/a.rs", "a\nalice\n");
+    git(&dir, &["add", "src/a.rs"]);
+    assert!(
+        commit(&dir, "alice", "Teach a.rs about alice")
+            .status
+            .success()
+    );
+    stop_uncommitted(&dir, "alice");
+    let out = six(&dir, "alice", &["finish"]);
+    assert_eq!(out.status.code(), Some(0), "{}", stderr(&out));
+    let body = out_text(&dir, &["log", "-1", "--format=%b"]);
+    assert!(body.starts_with("- Teach a.rs about alice [alice]\n"), "{body}");
 }

@@ -130,6 +130,18 @@ impl Store {
         Ok(())
     }
 
+    /// Files `agent_id` was refused and hasn't edited since, with who held each.
+    pub fn blocked_on(&self, agent_id: &str) -> Result<Vec<(String, String)>> {
+        let mut out: Vec<(String, String)> = self
+            .pending_of(agent_id)?
+            .into_iter()
+            .filter(|p| !p.stale)
+            .map(|p| (p.path, p.by))
+            .collect();
+        out.sort();
+        Ok(out)
+    }
+
     /// End of turn: report blocks the agent never got past.
     pub fn note_end(&self, agent_id: &str) -> Result<()> {
         for p in self.pending_of(agent_id)? {

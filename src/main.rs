@@ -1,4 +1,5 @@
 mod agent;
+mod contact;
 mod events;
 mod git;
 mod hook;
@@ -51,14 +52,24 @@ enum Command {
         #[arg(long, conflicts_with = "paths")]
         agent: Option<String>,
     },
-    /// Put this checkout on a session branch (agents/<date>-<topic>), or report the one in use.
-    Session { topic: Option<String> },
+    /// Put this checkout on today's session branch (agents/<date>, then .2, .3, ...), or report the one in use.
+    Session {
+        /// Ignored: sessions are named by date. Accepted so older instructions still work.
+        #[arg(hide = true)]
+        topic: Option<String>,
+    },
     /// Merge the session branch into the default branch and switch back (the last agent working).
     Finish,
     /// Record a decision so it outlives the chat session; shown in status and watch.
     Decide { text: Vec<String> },
     /// Show who is editing what.
     Status,
+    /// Record your chat thread (e.g. a T3 Code thread id) so agents you block can ask you to release files.
+    Contact {
+        thread: String,
+        #[arg(long, default_value = "t3")]
+        app: String,
+    },
     /// Count what six-ten did here (blocks and how they ended, refusals, finishes) from its event log.
     Stats,
     /// Sleep until a time or your usage limit's reset, then print a reminder to start working.
@@ -185,6 +196,18 @@ fn run(command: Command) -> Result<u8> {
             println!("{}", policy::woke(store.as_ref(), &agent, &plan, &task)?);
             Ok(0)
         }
+        Command::Contact { thread, app } => {
+            let agent = Agent::current();
+            contact::save(
+                &agent.id,
+                &contact::Contact {
+                    app: app.clone(),
+                    thread: thread.clone(),
+                },
+            )?;
+            println!("recorded: agents you block can message your {app} thread {thread}");
+            Ok(0)
+        }
         Command::Stats => {
             print!("{}", events::stats_text(&repos::here_or_nearby(&cwd)));
             Ok(0)
@@ -231,8 +254,8 @@ fn run(command: Command) -> Result<u8> {
                     println!("released {} lease(s)", released.len());
                     Ok(0)
                 }
-                Command::Session { topic } => {
-                    println!("{}", policy::session(&store, &agent, topic.as_deref())?);
+                Command::Session { .. } => {
+                    println!("{}", policy::session(&store, &agent)?);
                     Ok(0)
                 }
                 Command::Finish => match policy::finish(&store, &agent)? {
@@ -307,7 +330,20 @@ fn run(command: Command) -> Result<u8> {
 
 pub fn status_text(store: &Store, me: &Agent) -> Result<String> {
     let now = now();
-    let mut out = format!("you are {}\n", me.id);
+    let _ = contact::detect(&me.id, None);
+    let thread = match contact::of(&me.id) {
+        Some(c) => format!(
+            "; agents you block can message your {} thread {}",
+            c.app, c.thread
+        ),
+        // Only apps with addressable threads (T3 Code) make this worth asking about.
+        None if std::env::var_os("T3CODE_CLI_PATH").is_some() => {
+            "; your T3 thread is unknown: record it with six_ten_contact / `six-ten contact <id>`"
+                .into()
+        }
+        None => String::new(),
+    };
+    let mut out = format!("you are {}{thread}\n", me.id);
     let active = store.active_others(&me.id)?;
     if active.is_empty() {
         out.push_str("no other agents active\n");
@@ -352,10 +388,13 @@ pub fn status_text(store: &Store, me: &Agent) -> Result<String> {
     let events = store.events();
     if !events.is_empty() {
         out.push_str("recent:\n");
-        for e in events.iter().skip(events.len().saturating_sub(8)) {
+        for e in events.iter().skip(events.len().saturating_sub(4)) {
+            let mut line = events::line(e);
+            if line.chars().count() > 120 {
+                line = line.chars().take(117).collect::<String>() + "...";
+            }
             out.push_str(&format!(
-                "  {}  ({} ago)\n",
-                events::line(e),
+                "  {line}  ({} ago)\n",
                 policy::human(now.saturating_sub(e.at))
             ));
         }
