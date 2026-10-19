@@ -253,9 +253,18 @@ fn located(decision: Decision, root: &Path) -> Decision {
     }
 }
 
-/// Whether `shell_dir` knows where `command` runs: no leading `cd`, or one to an existing directory.
+/// Whether `shell_dir` knows where `command` runs: no `cd`, or only a leading one to an existing
+/// directory. A `cd` later in the chain (`mkdir x && cd x && git commit`) moves it somewhere unknown.
 fn dir_is_known(cwd: &Path, command: &str) -> bool {
-    !command.trim_start().starts_with("cd ") || shell_dir(cwd, command) != cwd
+    let cds = command
+        .split(['&', ';', '|', '\n', '('])
+        .filter(|part| part.trim_start().starts_with("cd "))
+        .count();
+    match cds {
+        0 => true,
+        1 => command.trim_start().starts_with("cd ") && shell_dir(cwd, command) != cwd,
+        _ => false,
+    }
 }
 
 /// Where a shell command runs: the directory of a leading `cd <dir>`, else `cwd`.
@@ -598,6 +607,16 @@ mod tests {
             patch_paths(patch),
             vec!["src/a.rs", "b.txt", "c.rs", "d.rs", "e.rs"]
         );
+    }
+
+    #[test]
+    fn knows_where_a_command_runs_only_without_a_later_cd() {
+        let cwd = std::env::temp_dir();
+        assert!(dir_is_known(&cwd, "git commit -m x"));
+        assert!(dir_is_known(&cwd, "cd / && git commit -m x"));
+        assert!(!dir_is_known(&cwd, "cd /no/such/dir && git commit -m x"));
+        assert!(!dir_is_known(&cwd, "mkdir x && cd x && git commit -m x"));
+        assert!(!dir_is_known(&cwd, "cd / && cd tmp && git commit -m x"));
     }
 
     #[test]
