@@ -367,19 +367,24 @@ fn post_shell(pre: Event) -> Event {
 }
 
 /// Payload built by integrations/opencode/six-ten.ts: `{event, tool, sessionID, args, directory}`.
+/// OpenCode 2 names the file `path` and the shell tool `shell`; OpenCode 1 used `filePath` and `bash`.
 fn opencode(p: &Value) -> (Event, Option<String>) {
     let args = &p["args"];
     let tool = p["tool"].as_str().unwrap_or_default();
+    let file = || strings(&[&args["filePath"], &args["path"]]);
+    let shell = matches!(tool, "bash" | "shell");
     let pre = || match tool {
-        "edit" | "write" => strings(&[&args["filePath"]]),
-        "apply_patch" => patch_event(args["patchText"].as_str()),
-        "bash" => shell_event(args["command"].as_str()),
+        "edit" | "write" => file(),
+        "apply_patch" | "patch" => {
+            patch_event(args["patchText"].as_str().or(args["patch"].as_str()))
+        }
+        _ if shell => shell_event(args["command"].as_str()),
         _ => Event::Ignore,
     };
     let event = match p["event"].as_str().unwrap_or_default() {
         "tool.execute.before" => pre(),
-        "tool.execute.after" if tool == "read" => post_read(strings(&[&args["filePath"]])),
-        "tool.execute.after" if tool == "bash" => post_shell(pre()),
+        "tool.execute.after" if tool == "read" => post_read(file()),
+        "tool.execute.after" if shell => post_shell(pre()),
         "tool.execute.after" => post_write(pre()),
         "chat.message" => Event::TurnStart,
         "session.idle" => Event::Stop,
@@ -689,6 +694,16 @@ mod tests {
         assert_eq!(
             parse("opencode", &oc).unwrap(),
             (Event::PreEdit(vec!["x.ts".into()]), Some("ses_1".into()))
+        );
+        let oc2 = json!({"event": "tool.execute.before", "tool": "edit", "sessionID": "ses_2", "args": {"path": "/r/y.ts", "oldString": "a", "newString": "b"}});
+        assert_eq!(
+            parse("opencode", &oc2).unwrap().0,
+            Event::PreEdit(vec!["/r/y.ts".into()])
+        );
+        let oc2_shell = json!({"event": "tool.execute.before", "tool": "shell", "sessionID": "ses_2", "args": {"command": "echo hi > z.txt"}});
+        assert_eq!(
+            parse("opencode", &oc2_shell).unwrap().0,
+            Event::PreShell("echo hi > z.txt".into())
         );
         let hermes = json!({"hook_event_name": "pre_tool_call", "tool_name": "patch", "tool_input": {"path": "h.py"}, "session_id": "s"});
         assert_eq!(
