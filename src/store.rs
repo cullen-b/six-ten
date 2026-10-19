@@ -160,6 +160,16 @@ impl Store {
             })
     }
 
+    /// When `agent_id` last ran a six-ten hook or tool here.
+    pub fn presence_of(&self, agent_id: &str) -> Option<Presence> {
+        read_json(
+            &self
+                .dir
+                .join("presence")
+                .join(format!("{}.json", hex_sha(agent_id))),
+        )
+    }
+
     /// Records that `agent_id`'s turn is over, so it no longer counts as working; false if it was never seen.
     pub fn mark_ended(&self, agent_id: &str) -> Result<bool> {
         let file = self

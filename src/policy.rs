@@ -91,7 +91,7 @@ pub fn pre_edit_with_reason(
         }
         Claim::Conflict(leases) => {
             store.note_blocked(&agent.id, &leases)?;
-            Ok(Decision::Deny(conflict_message(&leases)))
+            Ok(Decision::Deny(conflict_message(store, &agent.id, &leases)))
         }
     }
 }
@@ -248,7 +248,7 @@ pub fn pre_shell(store: &Store, agent: &Agent, cwd: &Path, command: &str) -> Res
         return Ok(Decision::Deny(
             "six-ten: agents don't create worktrees here. Every agent shares this checkout and its branch, \
              and six-ten keeps you from colliding: edit files right here and commit your own files on the \
-             session branch (run `six-ten session <topic>` first if you're on the default branch)."
+             session branch (run `six-ten session` first if you're on the default branch)."
                 .into(),
         ));
     }
@@ -265,7 +265,7 @@ pub fn pre_shell(store: &Store, agent: &Agent, cwd: &Path, command: &str) -> Res
         let default = git::default_branch(store.root());
         return Ok(Decision::Deny(format!(
             "six-ten: agents don't create or switch branches; every agent shares this checkout's branch. \
-             On `{default}`, run `six-ten session <topic>` before your first commit. To wrap up, commit your \
+             On `{default}`, run `six-ten session` before your first commit. To wrap up, commit your \
              own files; the last agent working runs `six-ten finish`, which merges into `{default}` and \
              switches back."
         )));
@@ -330,7 +330,7 @@ pub fn pre_shell(store: &Store, agent: &Agent, cwd: &Path, command: &str) -> Res
     Ok(Decision::Deny(format!(
         "six-ten: blocked `{}` because other agents are working in this checkout and it would discard or rewrite \
          their changes:\n  {}\nDo not stash, reset, restore, clean, switch branches or pull while they are active \
-         (to start a session branch, run `six-ten session <topic>`, which is safe while others work). \
+         (to start a session branch, run `six-ten session`, which is safe while others work). \
          Operate only on your own files: discard yours by path, or `git add <your files>` and commit. To get \
          back to the default branch, the last agent working runs `six-ten finish`.",
         labels.join("`, `"),
@@ -357,7 +357,7 @@ pub fn pre_commit(store: &Store, agent: &Agent) -> Result<Decision> {
             format!("commit on {b} refused: agents commit on a session branch"),
         )?;
         return Ok(Decision::Deny(format!(
-            "six-ten: agents don't commit on `{b}`. Run `six-ten session <topic>` first: it starts today's session \
+            "six-ten: agents don't commit on `{b}`. Run `six-ten session` first: it starts today's session \
              branch, or reuses the one another agent already started, without touching anyone's files. Then \
              commit again."
         )));
@@ -394,6 +394,7 @@ pub fn pre_commit(store: &Store, agent: &Agent) -> Result<Decision> {
     }
     hits.sort();
     hits.dedup();
+    let paths: Vec<&str> = hits.iter().filter_map(|h| h.split(" (").next()).collect();
     if overridden {
         let text = format!(
             "committed other agents' work with SIX_TEN_ALLOW_COMMIT=1: {}",
@@ -408,16 +409,18 @@ pub fn pre_commit(store: &Store, agent: &Agent) -> Result<Decision> {
         format!("commit refused, it included: {}", hits.join(", ")),
     )?;
     Ok(Decision::Deny(format!(
-        "six-ten: commit blocked, it includes other agents' work in progress:\n  {}\nUnstage those \
-         (`git restore --staged <path>`) and commit the rest of your files now. The agents working on them commit \
-         them; a file you both edited is yours to commit once the other agent's turn ends.",
-        hits.join("\n  ")
+        "six-ten: commit blocked, it includes other agents' work in progress:\n  {}\nRun \
+         `git restore --staged {}` and commit the rest of your files now. Don't retry with those files: the agents \
+         working on them commit them, and a file you both edited is committed by whoever finishes last (six-ten \
+         tells them).",
+        hits.join("\n  "),
+        paths.join(" ")
     )))
 }
 
-/// Puts this checkout on a session branch: creates `agents/<date>-<topic>` when on the default
+/// Puts this checkout on a session branch: creates `agents/<date>` (or `.2`, `.3`, ...) when on the default
 /// branch, or reports the branch already in use. Serialized, so racing agents share one branch.
-pub fn session(store: &Store, agent: &Agent, topic: Option<&str>) -> Result<String> {
+pub fn session(store: &Store, agent: &Agent) -> Result<String> {
     store.locked(|| {
         let root = store.root();
         let current =
@@ -429,23 +432,8 @@ pub fn session(store: &Store, agent: &Agent, topic: Option<&str>) -> Result<Stri
         }
         let date = std::process::Command::new("date").arg("+%F").output()?;
         let date = String::from_utf8_lossy(&date.stdout).trim().to_string();
-        let slug: String = topic
-            .unwrap_or("work")
-            .to_lowercase()
-            .chars()
-            .map(|c| if c.is_ascii_alphanumeric() { c } else { '-' })
-            .collect::<String>()
-            .split('-')
-            .filter(|s| !s.is_empty())
-            .collect::<Vec<_>>()
-            .join("-");
-        let slug: String = if slug.is_empty() {
-            "work".into()
-        } else {
-            slug.chars().take(40).collect()
-        };
-        // Later sessions of the day continue the first one's name: `<first>.2`, `<first>.3`, ...
-        let today = git::branches_with_prefix(root, &format!("agents/{date}-"));
+        // Named by date only; later sessions of the day continue it: `.2`, `.3`, ...
+        let today = git::branches_with_prefix(root, &format!("agents/{date}"));
         let base = today
             .first()
             .map(|b| {
@@ -453,7 +441,7 @@ pub fn session(store: &Store, agent: &Agent, topic: Option<&str>) -> Result<Stri
                     .filter(|(_, n)| n.parse::<u32>().is_ok())
                     .map_or(b.as_str(), |(s, _)| s)
             })
-            .map_or_else(|| format!("agents/{date}-{slug}"), String::from);
+            .map_or_else(|| format!("agents/{date}"), String::from);
         let mut name = base.clone();
         let mut n = 2;
         while git::branch_exists(root, &name) {
@@ -474,42 +462,16 @@ pub fn session(store: &Store, agent: &Agent, topic: Option<&str>) -> Result<Stri
 
 /// Before an agent commits on the default branch, puts the checkout on the session branch so the
 /// commit lands there instead of being refused.
-pub fn session_for_commit(store: &Store, agent: &Agent, command: &str) -> Result<Decision> {
+pub fn session_for_commit(store: &Store, agent: &Agent) -> Result<Decision> {
     let root = store.root();
     let on_default = git::current_branch(root).is_some_and(|b| git::is_default_branch(root, &b));
-    // A command that runs `six-ten session` itself picks its own topic.
-    let starts_own = command.contains("six-ten session");
-    if !on_default
-        || starts_own
-        || !git::session_branches_enabled(root)
-        || store.main_worktree().is_some()
-    {
+    if !on_default || !git::session_branches_enabled(root) || store.main_worktree().is_some() {
         return Ok(Decision::Allow);
     }
-    let started = session(store, agent, commit_subject(command).as_deref())?;
+    let started = session(store, agent)?;
     Ok(Decision::Note(format!(
         "six-ten: agents don't commit on the default branch, so this commit goes on the session branch: {started}."
     )))
-}
-
-/// First line of the message given to `git commit -m`, also inside a `$(cat <<EOF ...)` heredoc.
-fn commit_subject(command: &str) -> Option<String> {
-    let at = command.match_indices(" -").find_map(|(i, _)| {
-        let flag = command[i + 1..].split_whitespace().next()?;
-        (flag.ends_with('m') && flag[1..].chars().all(|c| c.is_ascii_alphabetic()))
-            .then_some(i + 1 + flag.len())
-    })?;
-    let rest = command[at..].trim_start();
-    let quote = rest.chars().next().filter(|c| matches!(c, '"' | '\''))?;
-    let message = rest[1..].split(quote).next()?;
-    let mut lines = message.lines().map(str::trim);
-    let first = lines.next()?;
-    let subject = if first.starts_with("$(") {
-        lines.next()?
-    } else {
-        first
-    };
-    (!subject.is_empty()).then(|| subject.to_string())
 }
 
 /// Trailers for a commit by `agent`: who made it, and who else edited its files.
@@ -614,6 +576,28 @@ pub fn stop(store: &Store, agent: &Agent) -> Result<Decision> {
     if store.main_worktree().is_some() {
         return end(store, agent).map(|_| Decision::Allow);
     }
+    // An edit given up on is easy to forget: point the agent back at it once.
+    let blocked = store.blocked_on(&agent.id)?;
+    if !blocked.is_empty() {
+        let list: Vec<String> = blocked
+            .iter()
+            .map(|(path, by)| format!("{path} (held by {by})"))
+            .collect();
+        let text = format!(
+            "six-ten: you were refused these files and never edited them:\n  {}\nIf those edits are still needed, \
+             come back to them now: the holder may be done (`six-ten status`), so retry, or call six_ten_wait if \
+             nothing else is left. If they're no longer needed, say so in your summary.",
+            list.join("\n  ")
+        );
+        if store.first_reminder(&format!("{}#retry", agent.id), &text)? {
+            store.log(
+                &agent.id,
+                "reminded",
+                format!("come back to {}", list.join(", ")),
+            )?;
+            return Ok(Decision::Deny(text));
+        }
+    }
     let reminder = stop_reminder(store, agent)?.map(|r| {
         let (Reminder::Commit(text) | Reminder::Finish(text)) = r;
         format!(
@@ -679,7 +663,7 @@ fn stop_reminder(store: &Store, agent: &Agent) -> Result<Option<Reminder>> {
     if !mine.is_empty() {
         mine.sort();
         let session = if on_default && git::session_branches_enabled(root) {
-            "Run `six-ten session <topic>` first, then commit"
+            "Run `six-ten session` first, then commit"
         } else {
             "Commit them"
         };
@@ -831,7 +815,29 @@ pub fn finish(store: &Store, agent: &Agent) -> Result<Decision> {
         );
     }
     if ahead > 0 {
-        let msg = format!("Merge {branch}");
+        // The merge commit lists the session's commits, so `git log --first-parent` reads as a changelog.
+        let log = git::run(
+            root,
+            &[
+                "log",
+                "--reverse",
+                "--format=%s%x1f%(trailers:key=Agent,valueonly,separator=%x2C )",
+                &format!("{default}..{branch}"),
+            ],
+        )
+        .unwrap_or_default();
+        let log: String = log
+            .lines()
+            .filter_map(|l| {
+                let (subject, agent) = l.split_once('\x1f')?;
+                Some(if agent.is_empty() {
+                    format!("- {subject}\n")
+                } else {
+                    format!("- {subject} [{agent}]\n")
+                })
+            })
+            .collect();
+        let msg = format!("Merge {branch}\n\n{log}");
         if let Err(e) = git::run(root, &["merge", "-q", "--no-ff", "-m", &msg, &branch]) {
             let conflicts =
                 git::run(root, &["diff", "--name-only", "--diff-filter=U"]).unwrap_or_default();
@@ -920,12 +926,12 @@ pub fn wait(
         Claim::Conflict(leases) => Ok(Decision::Deny(format!(
             "still busy after {}s. {}",
             timeout.as_secs(),
-            conflict_message(&leases)
+            conflict_message(store, &agent.id, &leases)
         ))),
     }
 }
 
-pub fn conflict_message(leases: &[Lease]) -> String {
+pub fn conflict_message(store: &Store, me: &str, leases: &[Lease]) -> String {
     let now = now();
     let mut holders: Vec<&str> = leases.iter().map(|l| l.agent.as_str()).collect();
     holders.sort();
@@ -937,20 +943,35 @@ pub fn conflict_message(leases: &[Lease]) -> String {
                 .reason
                 .as_deref()
                 .map_or(String::new(), |r| format!(": {r}"));
+            let active = store.presence_of(&l.agent).map_or(String::new(), |p| {
+                format!(", last active {} ago", human(now.saturating_sub(p.at)))
+            });
             format!(
-                "`{}` is being edited by {} (lease expires in {}){why}",
+                "`{}` is being edited by {} (lease expires in {}{active}){why}",
                 l.path,
                 l.agent,
                 human(l.expires_at.saturating_sub(now)),
             )
         })
         .collect();
+    // Holders whose chat thread six-ten knows can be asked directly to let go of a stale lease.
+    let asks: Vec<String> = holders
+        .iter()
+        .filter_map(|h| {
+            let path = &leases.iter().find(|l| l.agent == *h)?.path;
+            crate::contact::ask_hint(h, me, path)
+        })
+        .collect();
+    let stuck = if asks.is_empty() {
+        stuck_hint(&holders)
+    } else {
+        asks.join(" ")
+    };
     format!(
         "six-ten: blocked, {}. Do not edit it now and do not work around this with shell commands. Work on other \
          files first and retry this edit later, or call the six_ten_wait tool (CLI: `six-ten wait <path>`) to block \
-         until it is free. {}",
+         until it is free. {stuck}",
         held.join("; "),
-        stuck_hint(&holders)
     )
 }
 

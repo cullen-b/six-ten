@@ -20,11 +20,14 @@ Several agents may share this checkout; six-ten keeps you from colliding.
 - Say why when you claim (`six-ten claim <path> -m 'reason'`): blocked agents see it and can
   coordinate instead of guessing. Record lasting decisions with `six-ten decide 'text'`.
 - If an edit is refused because another agent holds the file, work on other files and retry later.
-  Call `six_ten_wait` only when nothing else is left. Never get around a refusal with the shell.
+  Call `six_ten_wait` only when nothing else is left. Never get around a refusal with the shell. If
+  the refusal names the holder's thread and its lease looks stale, message that thread once asking it
+  to release the file. If `six-ten status` says your T3 thread is unknown, record it with
+  `six_ten_contact`.
 - Notes from six-ten are diffs of other agents' changes: account for them; re-read only when told to.
 - One checkout, one branch: never create worktrees or create/switch branches yourself. Before your
-  first commit, run `six-ten session <topic>`: it starts today's session branch, or reuses the one
-  in use (a commit on `main` starts it for you).
+  first commit, run `six-ten session`: it starts today's session branch (`agents/<date>`, then `.2`,
+  `.3`), or reuses the one in use (a commit on `main` starts it for you).
 - Started in a folder of repositories? Each edit is coordinated in its own repository; run git and
   six-ten commands inside the repository they're about (`cd <repo> && six-ten finish`).
 - Commit your own finished files before your turn ends: `git add <paths>` and commit, never
