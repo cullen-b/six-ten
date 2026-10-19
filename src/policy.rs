@@ -477,7 +477,13 @@ pub fn session(store: &Store, agent: &Agent, topic: Option<&str>) -> Result<Stri
 pub fn session_for_commit(store: &Store, agent: &Agent, command: &str) -> Result<Decision> {
     let root = store.root();
     let on_default = git::current_branch(root).is_some_and(|b| git::is_default_branch(root, &b));
-    if !on_default || !git::session_branches_enabled(root) || store.main_worktree().is_some() {
+    // A command that runs `six-ten session` itself picks its own topic.
+    let starts_own = command.contains("six-ten session");
+    if !on_default
+        || starts_own
+        || !git::session_branches_enabled(root)
+        || store.main_worktree().is_some()
+    {
         return Ok(Decision::Allow);
     }
     let started = session(store, agent, commit_subject(command).as_deref())?;
