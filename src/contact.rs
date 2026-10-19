@@ -101,23 +101,34 @@ fn t3_thread(session: &str) -> Option<String> {
     None
 }
 
-/// How a blocked agent can ask `holder` to release a lease that looks stale.
-pub fn ask_hint(holder: &str, me: &str, path: &str) -> Option<String> {
-    let c = of(holder)?;
-    let ask = format!(
-        "six-ten: {me} is waiting for `{path}`, which you hold. If you're done with it, release it \
-         (six_ten_release, or `six-ten release {path}`); if not, carry on."
-    );
-    Some(if c.app == "t3" {
-        format!(
-            "{holder} works in T3 Code thread {}. If its lease looks stale and you have T3 Code's \
-             t3_thread_send tool, send that thread this once: \"{ask}\"",
-            c.thread
-        )
-    } else {
-        format!(
-            "{holder} can be reached in {} thread {}. If its lease looks stale, send it this once: \"{ask}\"",
-            c.app, c.thread
-        )
-    })
+/// A Claude Code session's peer name and status, from `~/.claude/sessions/<pid>.json`; peers
+/// message each other by that name with Claude Code's SendMessage tool.
+fn claude_peer(agent_id: &str) -> Option<(String, String)> {
+    let base = agent_id.split('/').next()?;
+    let pid = base.strip_prefix("claude:")?;
+    let home = std::env::var("HOME").ok()?;
+    let file = PathBuf::from(home).join(format!(".claude/sessions/{pid}.json"));
+    let v: serde_json::Value = serde_json::from_slice(&fs::read(file).ok()?).ok()?;
+    Some((
+        v["name"].as_str()?.to_string(),
+        v["status"].as_str().unwrap_or("unknown").to_string(),
+    ))
+}
+
+/// The ways a blocked agent can wake `holder` directly, for when it seems stalled.
+pub fn wake_channels(holder: &str) -> Vec<String> {
+    let mut out = Vec::new();
+    if let Some(c) = of(holder) {
+        out.push(if c.app == "t3" {
+            format!("T3 Code thread {} (t3_thread_send)", c.thread)
+        } else {
+            format!("{} thread {}", c.app, c.thread)
+        });
+    }
+    if let Some((name, status)) = claude_peer(holder) {
+        out.push(format!(
+            "Claude Code session `{name}`, now {status} (SendMessage)"
+        ));
+    }
+    out
 }

@@ -211,9 +211,19 @@ fn respond(cwd: &Path, agent: &Agent, msg: &Value) -> Result<Value, (i64, String
                 params["name"].as_str().unwrap_or_default(),
                 args,
             );
+            // Harnesses without hooks hear from other agents here.
+            let mail: Vec<String> = repos::here_or_known(cwd, &agent.id)
+                .iter()
+                .flat_map(|s| s.take_mail(&agent.id).unwrap_or_default())
+                .collect();
+            let mail = if mail.is_empty() {
+                String::new()
+            } else {
+                format!("\n\n{}", mail.join("\n"))
+            };
             Ok(match result {
-                Ok((text, ok)) => tool_result(text, ok),
-                Err(e) => tool_result(format!("six-ten error: {e:#}"), false),
+                Ok((text, ok)) => tool_result(format!("{text}{mail}"), ok),
+                Err(e) => tool_result(format!("six-ten error: {e:#}{mail}"), false),
             })
         }
         other => Err((-32601, format!("method not found: {other}"))),
