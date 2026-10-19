@@ -27,7 +27,11 @@ const WRAPPERS: &[&str] = &[
 impl Agent {
     pub fn current() -> Agent {
         if let Some(id) = env::var("SIX_TEN_AGENT").ok().filter(|s| !s.is_empty()) {
-            return Agent { id, pid: None };
+            // A pid ties the id to a live process, as a harness's own id is (scripts and tests).
+            let pid = env::var("SIX_TEN_AGENT_PID")
+                .ok()
+                .and_then(|p| p.parse().ok());
+            return Agent { id, pid };
         }
         match harness_ancestor() {
             Some((pid, name)) => Agent {

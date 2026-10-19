@@ -970,7 +970,7 @@ pub fn conflict_message(store: &Store, leases: &[Lease]) -> String {
         .iter()
         .filter_map(|h| {
             let channels = crate::contact::wake_channels(h);
-            (!channels.is_empty()).then(|| format!("{h} via {}", channels.join(" or ")))
+            (!channels.is_empty()).then(|| format!("for {h}, {}", channels.join(", or ")))
         })
         .collect();
     let stuck = if wake.is_empty() {
