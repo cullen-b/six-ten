@@ -43,7 +43,7 @@ Separate worktrees avoid all of this by giving up on sharing a checkout. six-ten
 | | |
 |---|---|
 | **File leases** | The first agent to edit a file holds it. Others are refused with the holder's name and when it was last active, and are told to work on other files or call `six_ten_wait`. Races have exactly one winner. Claim with `-m "<reason>"` so blocked agents see the why. |
-| **Agent-to-agent nudges** | six-ten finds each agent's T3 Code thread on its own (or the agent records it with `six_ten_contact`). A refusal names the holder's thread, so a blocked agent can ask it to release a lease that looks stale. An agent that ends its turn still blocked is sent back once to retry the file or say it's no longer needed. |
+| **Agent-to-agent nudges** | When an agent is refused a file, six-ten tells the holder someone is waiting, on its next tool call or turn, in every harness (hooks deliver it; MCP-only harnesses get it in their next tool reply). If the holder seems stalled, the refusal names how to wake it: its T3 Code thread (found from T3's logs) or its Claude Code session name for `SendMessage` (from `~/.claude/sessions`), or a thread it recorded with `six_ten_contact`. An agent that ends its turn still blocked is sent back once to retry the file or say it's no longer needed. |
 | **Decisions** | `six-ten decide "<text>"` records a decision (and `six_ten_decide` from any agent) in the event feed, so it outlives the chat session. |
 | **Change notes** | When another agent changes a file you've read, you get a compact diff once: after your next tool call, at your next turn, or in your `six_ten_wait` result. |
 | **Stale-write stop** | About to write a file that changed since you read it? That write is refused once with the diff, and you keep the lease while you re-read. The retry goes through. |
@@ -381,7 +381,8 @@ six-ten mcp | hook <harness> | precommit    used by integrations
   Claude Code caches in `~/.claude.json` and Codex logs in `~/.codex/sessions`. For agents started
   outside a repository, it lists the repositories each one worked in under `$TMPDIR/six-ten-agents/`,
   next to each agent's chat thread. To find a T3 Code thread it reads the first 8 KB of the logs in
-  `~/.t3/userdata/logs/provider`, once per agent.
+  `~/.t3/userdata/logs/provider`, once per agent; for a Claude Code session's peer name it reads
+  `~/.claude/sessions/<pid>.json`.
 - The Codex profile widens the sandbox to `.git` only. Hooks and config stay read-only.
 - Hooks fail open by design. six-ten is a coordination tool for cooperating agents, not a security
   boundary against a hostile one.

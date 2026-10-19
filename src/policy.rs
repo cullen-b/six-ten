@@ -91,7 +91,7 @@ pub fn pre_edit_with_reason(
         }
         Claim::Conflict(leases) => {
             store.note_blocked(&agent.id, &leases)?;
-            Ok(Decision::Deny(conflict_message(store, &agent.id, &leases)))
+            Ok(Decision::Deny(conflict_message(store, &leases)))
         }
     }
 }
@@ -198,14 +198,25 @@ pub fn post_read(store: &Store, agent: &Agent, cwd: &Path, raw_paths: &[String])
 
 /// Changes to files the agent has seen that it has not been told about yet.
 pub fn news(store: &Store, agent: &Agent) -> Result<Decision> {
-    with_worktree_warning(store, agent, catch_up(store, agent, &[])?)
+    let decision = with_mail(store, agent, catch_up(store, agent, &[])?)?;
+    with_worktree_warning(store, agent, decision)
 }
 
 /// Start of a turn: report what changed since the last one, then reset the turn cursor.
 pub fn turn_start(store: &Store, agent: &Agent) -> Result<Decision> {
-    let decision = catch_up(store, agent, &[])?;
+    let decision = with_mail(store, agent, catch_up(store, agent, &[])?)?;
     store.record_turn_start(&agent.id)?;
     with_worktree_warning(store, agent, decision)
+}
+
+/// Adds messages other agents left for `agent` (e.g. asking it to release a file).
+pub fn with_mail(store: &Store, agent: &Agent, decision: Decision) -> Result<Decision> {
+    let mail = store.take_mail(&agent.id)?;
+    Ok(if mail.is_empty() {
+        decision
+    } else {
+        Decision::Note(mail.join("\n")).and(decision)
+    })
 }
 
 /// Tells an agent working in a linked worktree, once, that its work belongs in the main checkout.
@@ -926,12 +937,12 @@ pub fn wait(
         Claim::Conflict(leases) => Ok(Decision::Deny(format!(
             "still busy after {}s. {}",
             timeout.as_secs(),
-            conflict_message(store, &agent.id, &leases)
+            conflict_message(store, &leases)
         ))),
     }
 }
 
-pub fn conflict_message(store: &Store, me: &str, leases: &[Lease]) -> String {
+pub fn conflict_message(store: &Store, leases: &[Lease]) -> String {
     let now = now();
     let mut holders: Vec<&str> = leases.iter().map(|l| l.agent.as_str()).collect();
     holders.sort();
@@ -954,18 +965,27 @@ pub fn conflict_message(store: &Store, me: &str, leases: &[Lease]) -> String {
             )
         })
         .collect();
-    // Holders whose chat thread six-ten knows can be asked directly to let go of a stale lease.
-    let asks: Vec<String> = holders
+    // Six-ten already told each holder (it sees that on its next step); a stalled one needs waking.
+    let wake: Vec<String> = holders
         .iter()
         .filter_map(|h| {
-            let path = &leases.iter().find(|l| l.agent == *h)?.path;
-            crate::contact::ask_hint(h, me, path)
+            let channels = crate::contact::wake_channels(h);
+            (!channels.is_empty()).then(|| format!("{h} via {}", channels.join(" or ")))
         })
         .collect();
-    let stuck = if asks.is_empty() {
-        stuck_hint(&holders)
+    let stuck = if wake.is_empty() {
+        format!(
+            "Six-ten has told {} you're waiting. {}",
+            holders.join(" and "),
+            stuck_hint(&holders)
+        )
     } else {
-        asks.join(" ")
+        format!(
+            "Six-ten has told {} you're waiting; it sees that on its next step. If it seems stalled and you \
+             have the tool, message it once asking it to release the file: {}.",
+            holders.join(" and "),
+            wake.join("; ")
+        )
     };
     format!(
         "six-ten: blocked, {}. Do not edit it now and do not work around this with shell commands. Work on other \

@@ -20,10 +20,10 @@ Several agents may share this checkout; six-ten keeps you from colliding.
 - Say why when you claim (`six-ten claim <path> -m 'reason'`): blocked agents see it and can
   coordinate instead of guessing. Record lasting decisions with `six-ten decide 'text'`.
 - If an edit is refused because another agent holds the file, work on other files and retry later.
-  Call `six_ten_wait` only when nothing else is left. Never get around a refusal with the shell. If
-  the refusal names the holder's thread and its lease looks stale, message that thread once asking it
-  to release the file. If `six-ten status` says your T3 thread is unknown, record it with
-  `six_ten_contact`.
+  Call `six_ten_wait` only when nothing else is left. Never get around a refusal with the shell.
+  Six-ten tells the holder you're waiting; if it seems stalled, message it once through the channel
+  the refusal names (T3 thread, Claude Code session). Told someone waits on your file? Release it
+  if you're done with it.
 - Notes from six-ten are diffs of other agents' changes: account for them; re-read only when told to.
 - One checkout, one branch: never create worktrees or create/switch branches yourself. Before your
   first commit, run `six-ten session`: it starts today's session branch (`agents/<date>`, then `.2`,

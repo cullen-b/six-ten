@@ -2126,7 +2126,7 @@ fn blocked_agents_are_told_how_to_reach_the_holders_thread() {
     assert!(
         msg.contains("T3 Code thread thread-42")
             && msg.contains("t3_thread_send")
-            && msg.contains("bob is waiting for `src/a.rs`")
+            && msg.contains("you're waiting")
             && msg.contains("last active"),
         "{msg}"
     );
@@ -2155,5 +2155,82 @@ fn finish_lists_the_sessions_commits_in_the_merge() {
     let out = six(&dir, "alice", &["finish"]);
     assert_eq!(out.status.code(), Some(0), "{}", stderr(&out));
     let body = out_text(&dir, &["log", "-1", "--format=%b"]);
-    assert!(body.starts_with("- Teach a.rs about alice [alice]\n"), "{body}");
+    assert!(
+        body.starts_with("- Teach a.rs about alice [alice]\n"),
+        "{body}"
+    );
+}
+
+#[test]
+fn holders_hear_that_someone_waits_in_every_harness() {
+    let dir = repo();
+    // Claude Code holder: told on its next tool call, once.
+    edit_now(&dir, "alice", "src/a.rs", "a\nalice\n");
+    assert_eq!(
+        hook(&dir, "bob", "claude", edit(&dir, "src/a.rs"))
+            .status
+            .code(),
+        Some(2)
+    );
+    hook(&dir, "bob", "claude", edit(&dir, "src/a.rs"));
+    let next = hook(
+        &dir,
+        "alice",
+        "claude",
+        tool(&dir, "PostToolUse", "Read", "src/b.rs"),
+    );
+    let note = context(&next);
+    assert!(
+        note.contains("bob is waiting for `src/a.rs`") && note.contains("release it"),
+        "{note}"
+    );
+    let again = hook(
+        &dir,
+        "alice",
+        "claude",
+        tool(&dir, "PostToolUse", "Read", "src/b.rs"),
+    );
+    assert!(!context(&again).contains("waiting"), "delivered once");
+
+    // A harness with only MCP (Cursor) gets it in its next tool reply.
+    six(&dir, "cursor:5", &["claim", "src/b.rs"]);
+    assert_eq!(
+        six(&dir, "carol", &["claim", "src/b.rs"]).status.code(),
+        Some(2)
+    );
+    let replies = mcp_calls(
+        &dir,
+        "cursor:5",
+        &[json!({"name": "six_ten_status", "arguments": {}})],
+    );
+    assert!(
+        text_of(&replies[0]).contains("carol is waiting for `src/b.rs`"),
+        "{}",
+        text_of(&replies[0])
+    );
+}
+
+#[test]
+fn a_claude_code_holder_can_be_woken_by_its_peer_name() {
+    let dir = repo();
+    let home = dir.with_extension("claudehome");
+    fs::create_dir_all(home.join(".claude/sessions")).unwrap();
+    fs::write(
+        home.join(".claude/sessions/4242.json"),
+        r#"{"pid": 4242, "name": "repo-c1", "status": "idle"}"#,
+    )
+    .unwrap();
+    six(&dir, "claude:4242", &["claim", "src/a.rs"]);
+    let out = Command::new(BIN)
+        .current_dir(&dir)
+        .env("SIX_TEN_AGENT", "bob")
+        .env("HOME", &home)
+        .args(["claim", "src/a.rs"])
+        .output()
+        .unwrap();
+    let msg = stderr(&out);
+    assert!(
+        msg.contains("Claude Code session `repo-c1`, now idle (SendMessage)"),
+        "{msg}"
+    );
 }

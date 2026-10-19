@@ -20,6 +20,13 @@ pub struct Event {
     pub text: String,
 }
 
+/// A message for one agent, delivered on its next hook or six-ten tool call.
+#[derive(Debug, Serialize, Deserialize)]
+struct Mail {
+    to: String,
+    text: String,
+}
+
 /// An agent is waiting on `path`, either held by `by` or changed by `by` since it last read it.
 #[derive(Debug, Serialize, Deserialize)]
 struct Pending {
@@ -48,6 +55,15 @@ impl Store {
                 via_wait: false,
                 meanwhile: BTreeSet::new(),
             })?;
+            // Every harness hears from six-ten on its next step, so the holder learns someone waits.
+            self.send(
+                &lease.agent,
+                format!(
+                    "six-ten: {agent_id} is waiting for `{}`, which you hold. If you're done with it, release it \
+                     now (six_ten_release, or `six-ten release {}`); if not, carry on.",
+                    lease.path, lease.path
+                ),
+            )?;
             self.log(
                 agent_id,
                 "blocked",
@@ -158,6 +174,47 @@ impl Store {
             }
         }
         Ok(())
+    }
+
+    /// Queues `text` for agent `to`.
+    pub fn send(&self, to: &str, text: String) -> Result<()> {
+        let mail = Mail {
+            to: to.into(),
+            text,
+        };
+        self.locked(|| {
+            let mut file = OpenOptions::new()
+                .create(true)
+                .append(true)
+                .open(self.dir.join("inbox.jsonl"))?;
+            writeln!(file, "{}", serde_json::to_string(&mail)?)?;
+            Ok(())
+        })
+    }
+
+    /// Takes the messages for `agent_id` and its subagents, oldest first.
+    pub fn take_mail(&self, agent_id: &str) -> Result<Vec<String>> {
+        let file = self.dir.join("inbox.jsonl");
+        if !file.exists() {
+            return Ok(Vec::new());
+        }
+        self.locked(|| {
+            let all: Vec<Mail> = fs::read_to_string(&file)?
+                .lines()
+                .filter_map(|l| serde_json::from_str(l).ok())
+                .collect();
+            let (mine, rest): (Vec<Mail>, Vec<Mail>) =
+                all.into_iter().partition(|m| !blocks(agent_id, &m.to));
+            if !mine.is_empty() {
+                let body: String = rest
+                    .iter()
+                    .filter_map(|m| serde_json::to_string(m).ok())
+                    .map(|l| l + "\n")
+                    .collect();
+                fs::write(&file, body)?;
+            }
+            Ok(mine.into_iter().map(|m| m.text).collect())
+        })
     }
 
     pub fn log(&self, agent_id: &str, kind: &str, text: String) -> Result<()> {
