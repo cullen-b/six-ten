@@ -126,6 +126,9 @@ them running at once against one file. Sessions started in a folder of repos wer
 Claude Code 2.1.303. Agent-to-agent nudges were verified live between two Haiku agents in T3 Code
 threads: a blocked agent woke a stalled holder through `t3_thread_send` and through Claude Code's
 `SendMessage`, and the holder released the file within 15 seconds.
+OpenCode 2.0 (whose plugin API changed; the plugin serves both APIs) was verified live against a
+Claude Code agent in T3 Code in both directions: the blocked side's inbox note reached the holder on
+its next tool result, and the holder released the file (9 seconds for an OpenCode holder).
 
 **The Codex sandbox profile.** Codex keeps `.git` read-only, which stops agents from committing. The
 installed `six-ten` profile makes `.git` writable but keeps `.git/hooks` and `.git/config` read-only.
