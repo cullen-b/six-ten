@@ -2037,6 +2037,16 @@ fn an_agents_commit_on_the_default_branch_starts_the_session_branch() {
     git(&dir, &["add", "src/a.rs"]);
     assert!(commit(&dir, "alice", "Fix the auth flow").status.success());
     // Already on the session branch: nothing more happens.
+    let elsewhere = repo();
+    git(&elsewhere, &["switch", "-q", "-c", "main"]);
+    for cmd in [
+        "cd $SOMEWHERE && git commit -m x",
+        "git -C /tmp/x commit -m x",
+    ] {
+        let out = hook(&elsewhere, "alice", "claude", bash(&elsewhere, cmd));
+        assert!(!context(&out).contains("session branch"), "{cmd}");
+    }
+    assert_eq!(out_text(&elsewhere, &["branch", "--show-current"]), "main");
     let again = hook(&dir, "alice", "claude", bash(&dir, "git commit -m 'more'"));
     assert!(!context(&again).contains("session branch"));
 }
@@ -2096,9 +2106,11 @@ fn blocked_agents_are_told_how_to_reach_the_holders_thread() {
     let home = dir.with_extension("home");
     let logs = home.join(".t3/userdata/logs/provider");
     fs::create_dir_all(&logs).unwrap();
+    // Several threads can share one log (long names are cut short); each line names its thread.
     fs::write(
-        logs.join("events.thread-42.log"),
-        "[t] {\"payload\":{\"sessionId\":\"sess-9\",\"cwd\":\"/x\"}}\n",
+        logs.join("events.thread-4.log"),
+        "[t] {\"providerSessionId\":\"provider-session:provider-instance:claudeAgent:thread:other:r1\",\"payload\":{\"sessionId\":\"sess-1\"}}\n\
+         [t] {\"providerSessionId\":\"provider-session:provider-instance:claudeAgent:thread:thread-42:r2\",\"payload\":{\"sessionId\":\"sess-9\",\"cwd\":\"/x\"}}\n",
     )
     .unwrap();
     let mut child = Command::new(BIN)
@@ -2124,7 +2136,7 @@ fn blocked_agents_are_told_how_to_reach_the_holders_thread() {
     let blocked = hook(&dir, "bob", "claude", edit(&dir, "src/a.rs"));
     let msg = stderr(&blocked);
     assert!(
-        msg.contains("T3 Code thread thread-42")
+        msg.contains("t3_thread_send with threadId \"thread-42\"")
             && msg.contains("t3_thread_send")
             && msg.contains("you're waiting")
             && msg.contains("last active"),
@@ -2136,7 +2148,7 @@ fn blocked_agents_are_told_how_to_reach_the_holders_thread() {
     six(&dir, &named, &["claim", "src/b.rs"]);
     six(&dir, &named, &["contact", "thread-7"]);
     let msg = stderr(&six(&dir, "bob", &["claim", "src/b.rs"]));
-    assert!(msg.contains("T3 Code thread thread-7"), "{msg}");
+    assert!(msg.contains("threadId \"thread-7\""), "{msg}");
 }
 
 #[test]
@@ -2230,7 +2242,54 @@ fn a_claude_code_holder_can_be_woken_by_its_peer_name() {
         .unwrap();
     let msg = stderr(&out);
     assert!(
-        msg.contains("Claude Code session `repo-c1`, now idle (SendMessage)"),
+        msg.contains("Claude Code: SendMessage to \"repo-c1\" (that session is idle now)"),
         "{msg}"
     );
+}
+
+#[test]
+fn an_agent_in_one_repo_wraps_up_its_edits_in_another() {
+    let (_top, one, two) = folder();
+    let agent = format!("claude-in-one-{}", std::process::id());
+    let run = |payload: Value| {
+        let mut child = Command::new(BIN)
+            .current_dir(&one)
+            .env("SIX_TEN_AGENT", &agent)
+            .env("SIX_TEN_AGENT_PID", std::process::id().to_string())
+            .args(["hook", "claude"])
+            .stdin(Stdio::piped())
+            .stdout(Stdio::piped())
+            .stderr(Stdio::piped())
+            .spawn()
+            .unwrap();
+        child
+            .stdin
+            .take()
+            .unwrap()
+            .write_all(payload.to_string().as_bytes())
+            .unwrap();
+        child.wait_with_output().unwrap()
+    };
+    // Working in `one`, it edits `two` by absolute path.
+    let file = two.join("src/a.rs");
+    run(
+        json!({"hook_event_name": "PreToolUse", "tool_name": "Edit", "cwd": one, "tool_input": {"file_path": file}}),
+    );
+    fs::write(&file, "a\nfrom one\n").unwrap();
+    run(
+        json!({"hook_event_name": "PostToolUse", "tool_name": "Edit", "cwd": one, "tool_input": {"file_path": file}}),
+    );
+    assert!(out_text(&two, &["status", "--short"]).contains("src/a.rs"));
+    let stop = json!({"hook_event_name": "Stop", "cwd": one});
+    let reminded = run(stop.clone());
+    let msg = stderr(&reminded);
+    assert_eq!(reminded.status.code(), Some(2), "{msg}");
+    assert!(
+        msg.contains("/two && ...`") && msg.contains("src/a.rs"),
+        "{msg}"
+    );
+    assert_eq!(run(stop).status.code(), Some(0));
+    // Its turn is over, so its lease in `two` is gone.
+    let status = String::from_utf8(six(&two, "x", &["status"]).stdout).unwrap();
+    assert!(status.contains("no files are being edited"), "{status}");
 }

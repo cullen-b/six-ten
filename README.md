@@ -123,7 +123,9 @@ SIX_TEN_AGENT=a six-ten release
 
 Verified live with Claude Code 2.1.285, Codex 0.159, OpenCode 1.18 and Hermes 0.21, including all of
 them running at once against one file. Sessions started in a folder of repos were verified live with
-Claude Code 2.1.303.
+Claude Code 2.1.303. Agent-to-agent nudges were verified live between two Haiku agents in T3 Code
+threads: a blocked agent woke a stalled holder through `t3_thread_send` and through Claude Code's
+`SendMessage`, and the holder released the file within 15 seconds.
 
 **The Codex sandbox profile.** Codex keeps `.git` read-only, which stops agents from committing. The
 installed `six-ten` profile makes `.git` writable but keeps `.git/hooks` and `.git/config` read-only.

@@ -145,7 +145,9 @@ pub fn handle(harness: &str, payload: &Value) -> Result<Decision> {
                 Decision::Allow => {}
                 refused => return Ok(refused),
             }
-            if crate::git::commits(&command) {
+            // Only when the commit surely lands here: not after an unresolved `cd`, nor via `git -C`.
+            let sure = dir_is_known(&cwd, &command) && !command.contains("git -C");
+            if sure && crate::git::commits(&command) {
                 out = out.and(policy::session_for_commit(&store, &agent)?);
             }
         }
@@ -201,9 +203,20 @@ pub fn handle(harness: &str, payload: &Value) -> Result<Decision> {
             }
         }
         // Turn boundaries cover the repository at cwd or, outside one, each one the agent worked in.
+        // Turn boundaries cover the repository at cwd, plus each other one the agent worked in. Agents
+        // without a process of their own (SIX_TEN_AGENT ids) may share an id, so they get cwd only.
         Event::TurnStart | Event::Stop | Event::End => {
-            let is_here = Store::open(&cwd).is_ok();
-            for store in repos::here_or_known(&cwd, &agent.id) {
+            let here = Store::open(&cwd).ok().map(|s| s.root().to_path_buf());
+            let mut stores = repos::here_or_known(&cwd, &agent.id);
+            if here.is_some() && agent.pid.is_some() {
+                stores.extend(
+                    repos::known(&agent.id)
+                        .into_iter()
+                        .filter(|s| here.as_deref() != Some(s.root())),
+                );
+            }
+            for store in stores {
+                let is_here = here.as_deref() == Some(store.root());
                 if is_here {
                     enter(&store)?;
                 }
@@ -238,6 +251,11 @@ fn located(decision: Decision, root: &Path) -> Decision {
         Decision::Stale(t) => Decision::Stale(at(t)),
         Decision::Deny(t) => Decision::Deny(at(t)),
     }
+}
+
+/// Whether `shell_dir` knows where `command` runs: no leading `cd`, or one to an existing directory.
+fn dir_is_known(cwd: &Path, command: &str) -> bool {
+    !command.trim_start().starts_with("cd ") || shell_dir(cwd, command) != cwd
 }
 
 /// Where a shell command runs: the directory of a leading `cd <dir>`, else `cwd`.

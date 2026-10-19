@@ -71,7 +71,7 @@ pub fn remember(agent_id: &str, root: &Path) -> Result<()> {
 }
 
 /// Every repository `agent_id` has worked in.
-fn known(agent_id: &str) -> Vec<Store> {
+pub fn known(agent_id: &str) -> Vec<Store> {
     let text = fs::read_to_string(registry(agent_id)).unwrap_or_default();
     text.lines()
         .map(PathBuf::from)

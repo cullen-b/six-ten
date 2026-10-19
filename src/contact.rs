@@ -1,6 +1,7 @@
 use std::fs::{self, File};
-use std::io::Read;
+use std::io::{Read, Seek, SeekFrom};
 use std::path::PathBuf;
+use std::time::{Duration, SystemTime};
 
 use anyhow::Result;
 use serde::{Deserialize, Serialize};
@@ -37,7 +38,15 @@ pub fn save(agent_id: &str, contact: &Contact) -> Result<()> {
 /// Looks up the calling agent's thread once: `SIX_TEN_THREAD`, else T3 Code's log for the harness
 /// session (`session`, from a hook payload, or the harness's own environment).
 pub fn detect(agent_id: &str, session: Option<&str>) -> Result<()> {
-    if file(agent_id).exists() {
+    // Outside T3 Code a miss is final. Inside it, the thread's log may not show the session yet at
+    // the first hook, so a miss is retried after a couple of seconds.
+    let in_t3 = std::env::var_os("T3CODE_CLI_PATH").is_some();
+    let retry_after = Duration::from_secs(if in_t3 { 2 } else { u64::MAX / 4 });
+    let known = read_json::<Contact>(&file(agent_id)).is_some_and(|c| !c.thread.is_empty());
+    let fresh_miss = fs::metadata(file(agent_id))
+        .and_then(|m| m.modified())
+        .is_ok_and(|at| at.elapsed().unwrap_or_default() < retry_after);
+    if known || fresh_miss {
         return Ok(());
     }
     let found = match std::env::var("SIX_TEN_THREAD")
@@ -77,28 +86,72 @@ pub fn detect(agent_id: &str, session: Option<&str>) -> Result<()> {
 fn t3_thread(session: &str) -> Option<String> {
     let home = std::env::var("HOME").ok()?;
     let dir = PathBuf::from(home).join(".t3/userdata/logs/provider");
-    let mut logs: Vec<(std::time::SystemTime, PathBuf)> = fs::read_dir(dir)
+    let recent = SystemTime::now() - Duration::from_secs(30 * 60);
+    let mut logs: Vec<(SystemTime, PathBuf)> = fs::read_dir(dir)
         .ok()?
         .flatten()
         .filter_map(|e| Some((e.metadata().ok()?.modified().ok()?, e.path())))
+        .filter(|(at, _)| *at >= recent)
         .collect();
     logs.sort_by_key(|l| std::cmp::Reverse(l.0));
+    // Long file names are cut short, so several threads can share one log; a live session's lines
+    // are near the end, each naming its thread in the provider session id.
     let needle = format!("\"{session}\"");
     for (_, path) in logs {
-        let mut head = vec![0; 8192];
-        let Ok(n) = File::open(&path).and_then(|mut f| f.read(&mut head)) else {
+        let Ok(mut f) = File::open(&path) else {
             continue;
         };
-        if String::from_utf8_lossy(&head[..n]).contains(&needle) {
-            let name = path.file_name()?.to_str()?;
-            return Some(
-                name.strip_prefix("events.")?
-                    .strip_suffix(".log")?
-                    .to_string(),
-            );
+        let len = f.metadata().map(|m| m.len()).unwrap_or(0);
+        let _ = f.seek(SeekFrom::Start(len.saturating_sub(TAIL)));
+        let mut tail = Vec::new();
+        if f.take(TAIL).read_to_end(&mut tail).is_err() {
+            continue;
+        }
+        let tail = String::from_utf8_lossy(&tail);
+        let found = tail
+            .lines()
+            .rev()
+            .filter(|l| l.contains(&needle))
+            .find_map(thread_in_session_id);
+        if found.is_some() {
+            return found;
         }
     }
     None
+}
+
+/// How much of the end of each recent T3 log to search.
+const TAIL: u64 = 2 << 20;
+
+/// The thread in `"providerSessionId":"provider-session:...:thread:<url-encoded thread>:<run>"`.
+fn thread_in_session_id(text: &str) -> Option<String> {
+    let (_, rest) = text.split_once("\"providerSessionId\":\"")?;
+    let id = rest.split('"').next()?;
+    let (_, rest) = id.split_once(":thread:")?;
+    let (encoded, _) = rest.rsplit_once(':')?;
+    Some(percent_decode(encoded))
+}
+
+fn percent_decode(s: &str) -> String {
+    let bytes = s.as_bytes();
+    let mut out = Vec::with_capacity(bytes.len());
+    let mut i = 0;
+    while i < bytes.len() {
+        let hex = s
+            .get(i + 1..i + 3)
+            .and_then(|h| u8::from_str_radix(h, 16).ok());
+        match (bytes[i], hex) {
+            (b'%', Some(b)) => {
+                out.push(b);
+                i += 3;
+            }
+            (b, _) => {
+                out.push(b);
+                i += 1;
+            }
+        }
+    }
+    String::from_utf8_lossy(&out).into_owned()
 }
 
 /// A Claude Code session's peer name and status, from `~/.claude/sessions/<pid>.json`; peers
@@ -120,15 +173,32 @@ pub fn wake_channels(holder: &str) -> Vec<String> {
     let mut out = Vec::new();
     if let Some(c) = of(holder) {
         out.push(if c.app == "t3" {
-            format!("T3 Code thread {} (t3_thread_send)", c.thread)
+            format!("T3 Code: t3_thread_send with threadId \"{}\"", c.thread)
         } else {
             format!("{} thread {}", c.app, c.thread)
         });
     }
     if let Some((name, status)) = claude_peer(holder) {
         out.push(format!(
-            "Claude Code session `{name}`, now {status} (SendMessage)"
+            "Claude Code: SendMessage to \"{name}\" (that session is {status} now)"
         ));
     }
     out
+}
+
+#[cfg(test)]
+mod tests {
+    #[test]
+    fn reads_the_thread_from_t3_provider_session_ids() {
+        let line = r#"{"providerSessionId":"provider-session:provider-instance:claudeAgent:thread:thread%3Adelegated-task%3Acommand%253Amcp%253A59:1681aed5"}"#;
+        assert_eq!(
+            super::thread_in_session_id(line).as_deref(),
+            Some("thread:delegated-task:command%3Amcp%3A59")
+        );
+        let plain = r#""providerSessionId":"provider-session:provider-instance:claudeAgent:thread:bbcaeff0-1a19:2988""#;
+        assert_eq!(
+            super::thread_in_session_id(plain).as_deref(),
+            Some("bbcaeff0-1a19")
+        );
+    }
 }
