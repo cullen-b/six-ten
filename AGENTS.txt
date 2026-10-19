@@ -53,7 +53,9 @@ Ask the user before step 3, and report back at the end. Don't skip the backup.
    - Claude Code, per-repo install only: open the repo interactively once and accept the trust prompt.
    - Nothing for git: the commit guard installs itself in each repo the first time an agent works
      there.
-   - Optional: `six-ten watch` gives a live feed, and `six-ten notify on` turns on desktop
+   - Agents can be started in a folder of repos (e.g. ~/code); six-ten coordinates each repo.
+   - Optional: `six-ten stats` shows what six-ten has done so far, `six-ten watch` gives a live
+     feed, and `six-ten notify on` turns on desktop
      notifications.
 
 8. OFFER TO UPDATE THEIR AGENT INSTRUCTIONS (never edit them without asking)

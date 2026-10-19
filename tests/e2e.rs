@@ -1954,12 +1954,17 @@ fn a_session_in_a_folder_of_repos_is_coordinated_in_each_repo() {
     let stop = json!({"hook_event_name": "Stop", "cwd": top});
     let reminded = hook(&top, &alice, "claude", stop.clone());
     assert_eq!(reminded.status.code(), Some(2));
+    let msg = stderr(&reminded);
     assert!(
-        stderr(&reminded).contains("src/a.rs"),
-        "{}",
-        stderr(&reminded)
+        msg.contains("src/a.rs") && msg.contains("/one && ...`"),
+        "the reminder names the repo: {msg}"
     );
     assert_eq!(hook(&top, &alice, "claude", stop).status.code(), Some(0));
+    let stats = String::from_utf8(six(&top, &bob, &["stats"]).stdout).unwrap();
+    assert!(
+        stats.contains("most contended files: src/a.rs (1)"),
+        "{stats}"
+    );
     assert_eq!(edit(&bob, "one/src/a.rs").status.code(), Some(0));
 
     // CLI commands that need one repository name the candidates.
