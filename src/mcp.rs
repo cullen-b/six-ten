@@ -9,6 +9,7 @@ use serde_json::{Value, json};
 
 use crate::agent::Agent;
 use crate::policy::{self, Decision};
+use crate::repos;
 use crate::store::{Store, now};
 
 const WAKE: &str = "six_ten_wake";
@@ -24,9 +25,30 @@ hooks, so claim files with six_ten_claim right before you edit them, and release
 are done. If a file is held by another agent, work on other files and retry later; call six_ten_wait only when \
 nothing else is left to do. Never stash, reset, restore, clean, switch branches or pull while other agents are active.";
 
+/// How a caller outside every repository names the one it means.
+const NAME_REPO: &str = "Pass `repo`: a path inside the repository you mean.";
+
 /// Harnesses whose hooks already claim edits get fewer tools, so agents don't spend calls on claims.
 fn hooked(cwd: &Path, agent: &Agent) -> bool {
-    Store::open(cwd).is_ok_and(|s| s.is_hooked(crate::store::harness_of(&agent.id)))
+    let harness = crate::store::harness_of(&agent.id);
+    match Store::open(cwd) {
+        Ok(store) => store.is_hooked(harness),
+        // Launched in a folder of repositories: only a global install hooks them all.
+        Err(_) => crate::store::hooked_globally(harness),
+    }
+}
+
+/// The repositories a call without paths is about: `repo` if given, else the one at the server's
+/// cwd, else every one the agent has worked in.
+fn stores_for(cwd: &Path, agent: &Agent, args: &Value) -> Result<Vec<Store>> {
+    if let Some(repo) = args["repo"].as_str().filter(|r| !r.is_empty()) {
+        return Ok(vec![repos::open_at(&cwd.join(repo))?]);
+    }
+    let stores = repos::here_or_known(cwd, &agent.id);
+    if stores.is_empty() {
+        return Err(repos::not_a_repo(cwd, &agent.id, NAME_REPO));
+    }
+    Ok(stores)
 }
 
 /// Serves MCP over stdio (newline-delimited JSON-RPC) until stdin closes.
@@ -199,8 +221,6 @@ fn respond(cwd: &Path, agent: &Agent, msg: &Value) -> Result<Value, (i64, String
 }
 
 fn call(cwd: &Path, agent: &Agent, name: &str, args: &Value) -> Result<(String, bool)> {
-    let store = Store::open(cwd)?;
-    store.mark_present(agent)?;
     let paths: Vec<String> = args["paths"]
         .as_array()
         .map(|a| {
@@ -209,27 +229,85 @@ fn call(cwd: &Path, agent: &Agent, name: &str, args: &Value) -> Result<(String, 
                 .collect()
         })
         .unwrap_or_default();
+    // Each path is coordinated in its own repository, wherever the server was launched.
+    let groups = || -> Result<Vec<(Store, Vec<String>)>> {
+        let groups = repos::by_repo(cwd, &paths);
+        for (store, _) in &groups {
+            store.mark_present(agent)?;
+        }
+        Ok(groups)
+    };
+    let outside = || {
+        (
+            format!(
+                "nothing to claim: {} lies outside every git repository",
+                paths.join(", ")
+            ),
+            true,
+        )
+    };
     Ok(match name {
-        "six_ten_status" => (crate::status_text(&store, agent)?, true),
-        "six_ten_claim" => reply(
-            policy::pre_edit_with_reason(&store, agent, cwd, &paths, args["reason"].as_str())?,
-            format!("claimed: {}", paths.join(", ")),
-        ),
+        "six_ten_claim" | "six_ten_wait"
+            if !paths.is_empty() && repos::by_repo(cwd, &paths).is_empty() =>
+        {
+            outside()
+        }
+        "six_ten_status" => {
+            let stores = stores_for(cwd, agent, args)?;
+            let mut text = String::new();
+            for store in &stores {
+                if stores.len() > 1 {
+                    text.push_str(&format!("== {} ==\n", store.root().display()));
+                }
+                text.push_str(&crate::status_text(store, agent)?);
+            }
+            (text, true)
+        }
+        "six_ten_claim" => {
+            let mut decision = Decision::Allow;
+            for (store, paths) in groups()? {
+                decision = decision.and(policy::pre_edit_with_reason(
+                    &store,
+                    agent,
+                    cwd,
+                    &paths,
+                    args["reason"].as_str(),
+                )?);
+            }
+            reply(decision, format!("claimed: {}", paths.join(", ")))
+        }
         "six_ten_wait" => {
             let secs = args["timeout_seconds"].as_u64().unwrap_or(300).min(1800);
+            let mut decision = Decision::Allow;
+            for (store, paths) in groups()? {
+                decision = decision.and(policy::wait(
+                    &store,
+                    agent,
+                    cwd,
+                    &paths,
+                    Duration::from_secs(secs),
+                )?);
+            }
             reply(
-                policy::wait(&store, agent, cwd, &paths, Duration::from_secs(secs))?,
+                decision,
                 format!("free and claimed for you: {}", paths.join(", ")),
             )
         }
         "six_ten_release" => {
-            let only = (!paths.is_empty()).then(|| {
-                paths
-                    .iter()
-                    .filter_map(|p| store.normalize(cwd, p))
-                    .collect::<Vec<_>>()
-            });
-            let released = store.release(&agent.id, only.as_deref())?;
+            let mut released = Vec::new();
+            if paths.is_empty() {
+                for store in repos::here_or_known(cwd, &agent.id) {
+                    released.extend(store.release(&agent.id, None)?);
+                }
+            } else {
+                for (store, paths) in groups()? {
+                    let only: Vec<String> = paths
+                        .iter()
+                        .filter_map(|p| store.normalize(cwd, p))
+                        .collect();
+                    released.extend(store.release(&agent.id, Some(&only))?);
+                }
+            }
             (
                 format!(
                     "released {} lease(s): {}",
@@ -241,10 +319,16 @@ fn call(cwd: &Path, agent: &Agent, name: &str, args: &Value) -> Result<(String, 
         }
         "six_ten_decide" => {
             let text = args["text"].as_str().unwrap_or_default().trim().to_string();
+            let stores = stores_for(cwd, agent, args)?;
             if text.is_empty() {
                 ("give the decision to record".to_string(), false)
+            } else if stores.len() > 1 {
+                (
+                    repos::not_a_repo(cwd, &agent.id, NAME_REPO).to_string(),
+                    false,
+                )
             } else {
-                match store.log(&agent.id, "decision", text.clone()) {
+                match stores[0].log(&agent.id, "decision", text.clone()) {
                     Ok(()) => (format!("recorded decision: {text}"), true),
                     Err(e) => (format!("six-ten error: {e:#}"), false),
                 }
@@ -263,6 +347,7 @@ fn reply(decision: Decision, ok: String) -> (String, bool) {
 
 fn tools(hooked: bool) -> Value {
     let paths = json!({"type": "array", "items": {"type": "string"}, "description": "File paths (absolute or relative to the repo)"});
+    let repo = json!({"type": "string", "description": "A path inside the repository you mean; only needed when you work in several"});
     let mut tools = vec![
         json!({
             "name": "six_ten_wait",
@@ -277,7 +362,7 @@ fn tools(hooked: bool) -> Value {
         json!({
             "name": "six_ten_status",
             "description": "Who is editing what. Useful for choosing what to work on; never needed before an edit.",
-            "inputSchema": {"type": "object", "properties": {}},
+            "inputSchema": {"type": "object", "properties": {"repo": repo}},
         }),
         json!({
             "name": WAKE,
@@ -292,7 +377,7 @@ fn tools(hooked: bool) -> Value {
         json!({
             "name": "six_ten_decide",
             "description": "Record a decision (e.g. why approach X beat Y) so it outlives the chat session. Shown in status and watch.",
-            "inputSchema": {"type": "object", "properties": {"text": {"type": "string", "description": "The decision to record"}}, "required": ["text"]},
+            "inputSchema": {"type": "object", "properties": {"text": {"type": "string", "description": "The decision to record"}, "repo": repo}, "required": ["text"]},
         }),
     ];
     if !hooked {

@@ -1,11 +1,12 @@
 use std::io::Read;
-use std::path::PathBuf;
+use std::path::{Path, PathBuf};
 
 use anyhow::{Result, bail};
 use serde_json::{Value, json};
 
 use crate::agent::Agent;
 use crate::policy::{self, Decision};
+use crate::repos;
 use crate::store::Store;
 
 /// What a harness hook event means for six-ten.
@@ -92,64 +93,146 @@ pub fn handle(harness: &str, payload: &Value) -> Result<Decision> {
         .find_map(|k| payload[*k].as_str())
         .map(PathBuf::from)
         .unwrap_or(std::env::current_dir()?);
-    // Outside a git repository there is nothing to coordinate.
-    let Ok(store) = Store::open(&cwd) else {
-        return Ok(Decision::Allow);
-    };
     let base = Agent::current();
-    if let Some(session) = text(&payload["session_id"]).filter(|_| harness == "codex") {
-        store.record_session(&session, &base)?;
-    }
-    store.mark_hooked(crate::store::harness_of(&base.id))?;
-    let _ = crate::install::ensure_git_hook(&store);
     let agent = match &sub {
         Some(s) => base.sub(s),
-        None => base,
+        None => base.clone(),
+    };
+    let session = text(&payload["session_id"]).filter(|_| harness == "codex");
+    // Each repository the event touches is coordinated on its own; outside every one, nothing is.
+    let enter = |store: &Store| -> Result<()> {
+        if let Some(session) = &session {
+            store.record_session(session, &base)?;
+        }
+        store.mark_hooked(crate::store::harness_of(&base.id))?;
+        let _ = crate::install::ensure_git_hook(store);
+        store.mark_present(&agent)
     };
     // After a tool call, pass on news right away; Hermes cannot annotate a finished call.
-    store.mark_present(&agent)?;
-    let done = |r: Result<()>| {
-        r?;
+    let news = |store: &Store| {
         if harness == "hermes" {
             Ok(Decision::Allow)
         } else {
-            policy::news(&store, &agent)
+            policy::news(store, &agent)
         }
     };
+    let write = matches!(event, Event::PostWrite(_));
+    let mut out = Decision::Allow;
     match event {
-        Event::PreEdit(paths) => policy::pre_edit(&store, &agent, &cwd, &paths),
+        Event::PreEdit(paths) => {
+            for (store, paths) in repos::by_repo(&cwd, &paths) {
+                enter(&store)?;
+                out = out.and(policy::pre_edit(&store, &agent, &cwd, &paths)?);
+            }
+        }
         Event::PreShell(command) => {
-            let writes = shell_writes(&command);
-            let edit = if writes.is_empty() {
-                Decision::Allow
-            } else {
-                policy::pre_edit(&store, &agent, &cwd, &writes)?
+            let dir = shell_dir(&cwd, &command);
+            for (store, paths) in repos::by_repo(&dir, &shell_writes(&command)) {
+                enter(&store)?;
+                out = out.and(policy::pre_edit(&store, &agent, &dir, &paths)?);
+            }
+            if out.refuses() {
+                return Ok(out);
+            }
+            let Ok(store) = Store::open(&dir) else {
+                return Ok(out);
             };
-            if matches!(edit, Decision::Deny(_) | Decision::Stale(_)) {
-                return Ok(edit);
+            enter(&store)?;
+            match policy::pre_shell(&store, &agent, &dir, &command)? {
+                Decision::Allow => {}
+                refused => return Ok(refused),
             }
-            match policy::pre_shell(&store, &agent, &cwd, &command)? {
-                Decision::Allow => Ok(edit),
-                refused => Ok(refused),
+            if crate::git::commits(&command) {
+                out = out.and(policy::session_for_commit(&store, &agent, &command)?);
             }
         }
-        Event::PostWrite(paths) => done(policy::post_write(&store, &agent, &cwd, &paths)),
-        Event::PostRead(paths) => done(policy::post_read(&store, &agent, &cwd, &paths)),
+        Event::PostWrite(paths) | Event::PostRead(paths) => {
+            for (store, paths) in repos::by_repo(&cwd, &paths) {
+                enter(&store)?;
+                if write {
+                    policy::post_write(&store, &agent, &cwd, &paths)?;
+                } else {
+                    policy::post_read(&store, &agent, &cwd, &paths)?;
+                }
+                out = out.and(news(&store)?);
+            }
+        }
         Event::PostShell(command) => {
-            let decision = done(
-                policy::post_write(&store, &agent, &cwd, &shell_writes(&command))
-                    .and_then(|_| policy::post_read(&store, &agent, &cwd, &shell_reads(&command))),
-            )?;
-            if harness == "hermes" || !crate::git::commits(&command) {
-                return Ok(decision);
+            let dir = shell_dir(&cwd, &command);
+            let mut stores: Vec<Store> = Vec::new();
+            for (write, raw) in [
+                (true, shell_writes(&command)),
+                (false, shell_reads(&command)),
+            ] {
+                for (store, paths) in repos::by_repo(&dir, &raw) {
+                    enter(&store)?;
+                    if write {
+                        policy::post_write(&store, &agent, &dir, &paths)?;
+                    } else {
+                        policy::post_read(&store, &agent, &dir, &paths)?;
+                    }
+                    stores.push(store);
+                }
             }
-            policy::finish_nudge(&store, &agent, decision)
+            let here = Store::open(&dir).ok();
+            if let Some(store) = &here {
+                enter(store)?;
+            }
+            let mut seen: Vec<&Path> = Vec::new();
+            for store in stores.iter().chain(here.iter()) {
+                if !seen.contains(&store.root()) {
+                    seen.push(store.root());
+                    out = out.and(news(store)?);
+                }
+            }
+            if harness != "hermes" && crate::git::commits(&command) {
+                if let Some(store) = &here {
+                    out = policy::finish_nudge(store, &agent, out)?;
+                }
+            }
         }
-        Event::TurnStart => policy::turn_start(&store, &agent),
-        Event::Stop => policy::stop(&store, &agent),
-        Event::End => policy::end(&store, &agent).map(|_| Decision::Allow),
-        Event::Ignore => Ok(Decision::Allow),
+        // Turn boundaries cover the repository at cwd or, outside one, each one the agent worked in.
+        Event::TurnStart | Event::Stop | Event::End => {
+            let is_here = Store::open(&cwd).is_ok();
+            for store in repos::here_or_known(&cwd, &agent.id) {
+                if is_here {
+                    enter(&store)?;
+                }
+                out = out.and(match event {
+                    Event::TurnStart => policy::turn_start(&store, &agent)?,
+                    Event::Stop if is_here || !store.touched_by(&agent.id)?.is_empty() => {
+                        policy::stop(&store, &agent)?
+                    }
+                    _ => policy::end(&store, &agent).map(|_| Decision::Allow)?,
+                });
+            }
+        }
+        Event::Ignore => {}
     }
+    Ok(out)
+}
+
+/// Where a shell command runs: the directory of a leading `cd <dir>`, else `cwd`.
+pub fn shell_dir(cwd: &Path, command: &str) -> PathBuf {
+    let Some(rest) = command.trim_start().strip_prefix("cd ") else {
+        return cwd.to_path_buf();
+    };
+    let rest = rest.trim_start();
+    let dir = match rest.chars().next() {
+        Some(q @ ('"' | '\'')) => rest[1..].split(q).next().unwrap_or_default(),
+        _ => rest
+            .split(|c: char| c.is_whitespace() || matches!(c, ';' | '&' | '|'))
+            .next()
+            .unwrap_or_default(),
+    };
+    let dir = match (dir.strip_prefix('~'), std::env::var("HOME")) {
+        (Some(tail), Ok(home)) if tail.is_empty() || tail.starts_with('/') => {
+            PathBuf::from(format!("{home}{tail}"))
+        }
+        _ => PathBuf::from(dir),
+    };
+    let dir = cwd.join(dir);
+    if dir.is_dir() { dir } else { cwd.to_path_buf() }
 }
 
 pub fn parse(harness: &str, p: &Value) -> Result<(Event, Option<String>)> {

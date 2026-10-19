@@ -122,7 +122,8 @@ pub fn current_branch(root: &Path) -> Option<String> {
     git_text(root, &["symbolic-ref", "--short", "-q", "HEAD"])
 }
 
-/// The branch session branches merge into: `origin/HEAD`'s target, else `main` or `master`.
+/// The branch session branches merge into: `origin/HEAD`'s target, else `main` or `master`, else
+/// (in a new repository) `init.defaultBranch`.
 pub fn default_branch(root: &Path) -> String {
     git_text(
         root,
@@ -136,6 +137,7 @@ pub fn default_branch(root: &Path) -> String {
             .find(|b| branch_exists(root, b))
             .map(String::from)
     })
+    .or_else(|| git_text(root, &["config", "init.defaultBranch"]).filter(|b| !b.is_empty()))
     .unwrap_or_else(|| "main".into())
 }
 

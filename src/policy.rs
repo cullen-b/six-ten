@@ -28,6 +28,21 @@ impl Decision {
             Decision::Deny(reason) => Err(reason),
         }
     }
+
+    /// Both outcomes as one, for calls that span repositories: a refusal wins, notes are joined.
+    pub fn and(self, other: Decision) -> Decision {
+        use Decision::*;
+        match (self, other) {
+            (Allow, d) | (d, Allow) => d,
+            (Deny(a), _) | (_, Deny(a)) => Deny(a),
+            (Stale(a), Stale(b) | Note(b)) | (Note(b), Stale(a)) => Stale(format!("{a}\n\n{b}")),
+            (Note(a), Note(b)) => Note(format!("{a}\n\n{b}")),
+        }
+    }
+
+    pub fn refuses(&self) -> bool {
+        matches!(self, Decision::Deny(_) | Decision::Stale(_))
+    }
 }
 
 const FILE_DIFF_LINES: usize = 80;
@@ -457,6 +472,40 @@ pub fn session(store: &Store, agent: &Agent, topic: Option<&str>) -> Result<Stri
     })
 }
 
+/// Before an agent commits on the default branch, puts the checkout on the session branch so the
+/// commit lands there instead of being refused.
+pub fn session_for_commit(store: &Store, agent: &Agent, command: &str) -> Result<Decision> {
+    let root = store.root();
+    let on_default = git::current_branch(root).is_some_and(|b| git::is_default_branch(root, &b));
+    if !on_default || !git::session_branches_enabled(root) || store.main_worktree().is_some() {
+        return Ok(Decision::Allow);
+    }
+    let started = session(store, agent, commit_subject(command).as_deref())?;
+    Ok(Decision::Note(format!(
+        "six-ten: agents don't commit on the default branch, so this commit goes on the session branch: {started}."
+    )))
+}
+
+/// First line of the message given to `git commit -m`, also inside a `$(cat <<EOF ...)` heredoc.
+fn commit_subject(command: &str) -> Option<String> {
+    let at = command.match_indices(" -").find_map(|(i, _)| {
+        let flag = command[i + 1..].split_whitespace().next()?;
+        (flag.ends_with('m') && flag[1..].chars().all(|c| c.is_ascii_alphabetic()))
+            .then_some(i + 1 + flag.len())
+    })?;
+    let rest = command[at..].trim_start();
+    let quote = rest.chars().next().filter(|c| matches!(c, '"' | '\''))?;
+    let message = rest[1..].split(quote).next()?;
+    let mut lines = message.lines().map(str::trim);
+    let first = lines.next()?;
+    let subject = if first.starts_with("$(") {
+        lines.next()?
+    } else {
+        first
+    };
+    (!subject.is_empty()).then(|| subject.to_string())
+}
+
 /// Trailers for a commit by `agent`: who made it, and who else edited its files.
 pub fn commit_trailers(store: &Store, agent: &Agent) -> Result<Vec<String>> {
     let mut out = Vec::new();
@@ -717,16 +766,64 @@ pub fn finish(store: &Store, agent: &Agent) -> Result<Decision> {
             owned.join("\n  ")
         )));
     }
-    let ahead = git::ahead(root, &default, &branch);
     let remote = git::has_remote(root, "origin");
     let mut report = Vec::new();
+    // A new repository whose first commits all went on the session branch has no default branch yet.
+    if !git::branch_exists(root, &default) && branch.starts_with("agents/") {
+        let commits = git::run(root, &["rev-list", "--count", &branch]).unwrap_or_default();
+        if let Err(e) = git::run(root, &["switch", "-q", "-c", &default]) {
+            return unfinished(
+                store,
+                agent,
+                format!("six-ten: could not create `{default}`: {e:#}"),
+            );
+        }
+        report.push(format!(
+            "created `{default}` from `{branch}` ({commits} commit(s)); this repository had no `{default}` yet"
+        ));
+        if remote {
+            match git::run(root, &["push", "-q", "-u", "origin", &default]) {
+                Ok(_) => report.push(format!("pushed `{default}`")),
+                Err(e) => report.push(format!(
+                    "could not push `{default}` ({e:#}); push it when you can"
+                )),
+            }
+        }
+        return finished(store, agent, report, remote, &default);
+    }
+    // Changes six-ten can't attribute would make git refuse the switch or the merge halfway through.
+    let differ = git::run(root, &["diff", "--name-only", &default, &branch]).unwrap_or_default();
+    let mut blockers: Vec<&str> = differ.lines().filter(|p| dirty.contains(*p)).collect();
+    if !blockers.is_empty() {
+        blockers.sort();
+        return unfinished(
+            store,
+            agent,
+            format!(
+                "six-ten: can't finish yet. These files have uncommitted changes that six-ten can't attribute to an \
+                 agent (the user's, or edits made outside six-ten's hooks), and merging into `{default}` would \
+                 overwrite them:\n  {}\nNothing changed; you're still on `{branch}`. Ask the user whether to commit \
+                 them on `{branch}` or discard them, then run `six-ten finish` again.",
+                blockers.join("\n  ")
+            ),
+        );
+    }
+    let ahead = git::ahead(root, &default, &branch);
     if remote && ahead > 0 {
         match git::run(root, &["push", "-q", "-u", "origin", &branch]) {
             Ok(_) => report.push(format!("pushed `{branch}`")),
             Err(e) => report.push(format!("could not push `{branch}` ({e:#})")),
         }
     }
-    git::run(root, &["switch", "-q", &default])?;
+    if let Err(e) = git::run(root, &["switch", "-q", &default]) {
+        return unfinished(
+            store,
+            agent,
+            format!(
+                "six-ten: could not switch to `{default}`, so nothing was merged and you're still on `{branch}`.\n({e:#})"
+            ),
+        );
+    }
     if ahead > 0 {
         let msg = format!("Merge {branch}");
         if let Err(e) = git::run(root, &["merge", "-q", "--no-ff", "-m", &msg, &branch]) {
@@ -734,16 +831,23 @@ pub fn finish(store: &Store, agent: &Agent) -> Result<Decision> {
                 git::run(root, &["diff", "--name-only", "--diff-filter=U"]).unwrap_or_default();
             let _ = git::run(root, &["merge", "--abort"]);
             git::run(root, &["switch", "-q", &branch])?;
-            return Ok(Decision::Deny(format!(
-                "six-ten: merging `{branch}` into `{default}` failed, so nothing changed and you're back on \
-                 `{branch}`. Conflicting files: {}. Merge `{default}` into `{branch}` (`git merge {default}`), \
-                 resolve and commit, then run `six-ten finish` again.\n({e:#})",
-                if conflicts.is_empty() {
-                    "none listed".into()
-                } else {
+            let advice = if conflicts.is_empty() {
+                "Git's reason is below; fix that, then run `six-ten finish` again.".to_string()
+            } else {
+                format!(
+                    "Conflicting files: {}. Merge `{default}` into `{branch}` (`git merge {default}`), resolve and \
+                     commit, then run `six-ten finish` again.",
                     conflicts.replace('\n', ", ")
-                }
-            )));
+                )
+            };
+            return unfinished(
+                store,
+                agent,
+                format!(
+                    "six-ten: merging `{branch}` into `{default}` failed, so nothing changed and you're back on \
+                     `{branch}`. {advice}\n({e:#})"
+                ),
+            );
         }
         report.insert(
             0,
@@ -760,6 +864,16 @@ pub fn finish(store: &Store, agent: &Agent) -> Result<Decision> {
     } else {
         report.push(format!("`{branch}` had nothing new"));
     }
+    finished(store, agent, report, remote, &default)
+}
+
+fn finished(
+    store: &Store,
+    agent: &Agent,
+    mut report: Vec<String>,
+    remote: bool,
+    default: &str,
+) -> Result<Decision> {
     if !remote {
         report.push("no `origin` remote, so nothing was pushed".into());
     }
@@ -767,6 +881,17 @@ pub fn finish(store: &Store, agent: &Agent) -> Result<Decision> {
     let text = report.join("; ");
     store.log(&agent.id, "finish", text.clone())?;
     Ok(Decision::Note(text))
+}
+
+/// A finish that stopped partway; logged so `six-ten stats` counts it.
+fn unfinished(store: &Store, agent: &Agent, reason: String) -> Result<Decision> {
+    let first = reason.lines().next().unwrap_or_default();
+    store.log(
+        &agent.id,
+        "unfinished",
+        first.trim_start_matches("six-ten: ").to_string(),
+    )?;
+    Ok(Decision::Deny(reason))
 }
 
 pub fn wait(

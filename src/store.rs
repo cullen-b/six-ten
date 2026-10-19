@@ -128,7 +128,8 @@ impl Store {
                 at: now(),
                 ended: false,
             },
-        )
+        )?;
+        crate::repos::remember(&agent.id, &self.root)
     }
 
     /// Remembers that harness session `session` is `agent`, so `resolve` can find it from inside a sandbox.
@@ -227,8 +228,7 @@ impl Store {
     }
 
     pub fn is_hooked(&self, harness: &str) -> bool {
-        self.dir.join("hooked").join(harness).exists()
-            || global_marker(harness).is_some_and(|m| m.exists())
+        self.dir.join("hooked").join(harness).exists() || hooked_globally(harness)
     }
 
     pub fn root(&self) -> &Path {
@@ -477,6 +477,11 @@ fn global_marker(harness: &str) -> Option<PathBuf> {
     crate::install::config_home().map(|d| d.join("six-ten/hooked").join(harness))
 }
 
+/// Whether `install --global` hooked `harness` into every repository.
+pub fn hooked_globally(harness: &str) -> bool {
+    global_marker(harness).is_some_and(|m| m.exists())
+}
+
 /// Marks `harness` as hooked in every repository (`install --global`).
 pub fn mark_hooked_globally(harness: &str) -> Result<()> {
     let marker = global_marker(harness).context("cannot locate ~/.config")?;
@@ -526,7 +531,7 @@ fn is_live(lease: &Lease, now: u64) -> bool {
 }
 
 /// Canonicalizes the longest existing prefix of `path`, so not-yet-created files resolve too.
-fn resolve(path: &Path) -> PathBuf {
+pub(crate) fn resolve(path: &Path) -> PathBuf {
     let mut existing = path.to_path_buf();
     let mut rest = Vec::new();
     while !existing.exists() {

@@ -51,7 +51,8 @@ Separate worktrees avoid all of this by giving up on sharing a checkout. six-ten
 | **Wrap-up** | At the end of its turn an agent is sent back once to commit its own files. The last agent working is told to run `six-ten finish`, which merges into `main` and leaves the checkout there. The commit itself tells the last agent to finish before writing its final summary, so the summary isn't buried under a follow-up; an agent sent back anyway is told to repeat it. An agent waiting on a background task isn't sent back, since its turn resumes when the task ends. |
 | **Commit guard** | A pre-commit check refuses commits that include files another agent is editing or has left uncommitted. |
 | **Wake on reset** | `six_ten_wake` (CLI: `six-ten wake`) puts an agent to sleep until a time or until your Claude Code or Codex usage window resets, then tells it to start working. See [Starting work when your usage resets](#starting-work-when-your-usage-resets). |
-| **Visibility** | `six-ten watch` shows a live feed of blocks, how they were resolved, and refusals. `six-ten notify on` sends desktop notifications. |
+| **Folders of repos** | An agent started in a folder that holds several repositories (`~/code`), or in a scratch directory, is still coordinated. Each edit is claimed in the repository it lands in, a shell command is checked in the repository it `cd`s into, and turn-end reminders and releases cover every repository the agent worked in. The MCP tools route the same way. |
+| **Visibility** | `six-ten watch` shows a live feed of blocks, how they were resolved, and refusals. `six-ten stats` counts them: blocks and how they ended, refusals by kind, sessions, finishes. `six-ten notify on` sends desktop notifications. |
 
 ## Quick start
 
@@ -136,8 +137,9 @@ branch. six-ten changes the workflow to fit:
   `agents/<date>-<topic>`. It's safe while others work: a new branch at the same commit doesn't touch
   anyone's files. If a branch is already checked out, it reuses it, so every agent ends up on the same
   one. Later sessions the same day continue the first one's name: `agents/<date>-<topic>.2`, `.3`, and
-  so on. Agents' commits on `main`/`master` are refused with a pointer to that command; your own
-  commits aren't affected. Agents can't create or switch branches or add worktrees themselves
+  so on. An agent that runs `git commit` on `main`/`master` is put on the session branch first, with
+  the commit's subject as the topic; an agent commit that gets past the hooks is refused with a
+  pointer to `six-ten session`. Your own commits aren't affected. Agents can't create or switch branches or add worktrees themselves
   (`git worktree add`, Claude Code's `EnterWorktree`). Opt out of session branches per repo with
   `git config six-ten.sessionBranches false`.
 - **Every agent commits its own work before its turn ends.** When an agent's turn ends with
@@ -153,8 +155,10 @@ branch. six-ten changes the workflow to fit:
   writing its summary, and again at turn end if it didn't. That pushes the session branch, merges it into
   `main` with `--no-ff`, pushes `main`, and leaves the checkout on `main`. No PR. It does nothing while
   another agent is mid-turn, and refuses until every agent's work is committed. If the merge
-  conflicts, it aborts and goes back to the session branch, so nothing is half-merged. To see who did
-  what:
+  conflicts, it aborts and goes back to the session branch, so nothing is half-merged. It stops before
+  touching anything if uncommitted changes nobody can be credited with would be overwritten, and asks
+  for them to be committed or discarded. In a new repository whose first commits all went on the
+  session branch, it creates `main` from that branch. To see who did what:
 
   ```sh
   git log main^1..main^2 --format='%h %s  [%(trailers:key=Agent,valueonly,separator=%x2C)]'
@@ -290,7 +294,8 @@ Any agent harness can use six-ten, at one of two levels. Start with `six-ten ins
 
 **1. MCP only (advisory).** Register `six-ten mcp` as a stdio MCP server. The agent gets
 `six_ten_claim`, `six_ten_wait`, `six_ten_release` and `six_ten_status`, and instructions to claim
-files before editing them.
+files before editing them. Paths route to their own repository, so the server works even when
+launched outside one.
 
 **2. Hooks (enforced).** If the harness can run a command before and after tool calls, pipe JSON to
 `six-ten hook generic`:
@@ -335,6 +340,7 @@ six-ten status                   active agents, leases, other agents' uncommitte
 six-ten session [topic]          start (or reuse) this checkout's agents/<date>-<topic> branch
 six-ten finish                   last agent out: merge the session branch into main, push, switch to main
 six-ten watch [--history N]      live event feed
+six-ten stats                    counts from the event log (in a repo, or each repo in a folder)
 six-ten notify [on|off]          desktop notifications for this repo (off by default)
 six-ten claim <paths>            claim manually; exit 2 with the reason if another agent holds any of them
 six-ten claim <paths> -m "<why>"  claim with a reason blocked agents can see
@@ -360,7 +366,8 @@ six-ten mcp | hook <harness> | precommit    used by integrations
 - Everything is local. six-ten makes no network calls and runs no daemon.
 - It only reads and writes inside the repository and its `.git/six-ten/`. `install hermes` is the
   exception: it writes the plugin to your Hermes home. `wake` and `usage` also read the usage figures
-  Claude Code caches in `~/.claude.json` and Codex logs in `~/.codex/sessions`.
+  Claude Code caches in `~/.claude.json` and Codex logs in `~/.codex/sessions`. For agents started
+  outside a repository, it lists the repositories each one worked in under `$TMPDIR/six-ten-agents/`.
 - The Codex profile widens the sandbox to `.git` only. Hooks and config stay read-only.
 - Hooks fail open by design. six-ten is a coordination tool for cooperating agents, not a security
   boundary against a hostile one.
