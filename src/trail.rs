@@ -138,7 +138,9 @@ pub fn state_reminder(store: &Store, agent: &Agent) -> Option<String> {
     Some(format!(
         "six-ten: you committed on `{branch}`, but nobody has updated {STATE_FILE} this session. It's the short, \
          current picture the next agent reads first: what works, what's in progress, what's known broken, what \
-         not to try. Rewrite the parts your work changed (replace, don't append; keep it short) and commit it. \
-         If your work changed nothing there, say so in your summary instead."
+         not to try. Rewrite the parts your work changed (replace, don't append) and commit it. Keep its layout: \
+         `## Works`, `## In progress`, `## Known broken`, `## Don't try` (each with its reason), one short bullet \
+         per fact, under ~40 lines, current facts only. If your work changed nothing there, say so in your \
+         summary instead."
     ))
 }

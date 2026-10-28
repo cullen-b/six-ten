@@ -17,7 +17,10 @@ Several agents may share this checkout; six-ten keeps you from colliding.
 
 - New here? Read `STATE.md` if the repo has one (where things stand now) and `six-ten log` (what
   earlier sessions did and decided). If your work changes that picture, rewrite the lines of
-  `STATE.md` it affects (replace, don't append) and commit it with your work.
+  `STATE.md` it affects (replace, don't append) and commit it with your work. Its layout: a
+  `# State of <project>` title, then `## Works`, `## In progress`, `## Known broken` and
+  `## Don't try` (each with its reason), one short bullet per fact, under ~40 lines. Current facts
+  only; history belongs in `six-ten log`. Create one only when the user asks for it.
 - Just edit. Edits are claimed automatically; claim files first only if `six_ten_claim` is in your
   tool list.
 - Say why when you claim (`six-ten claim <path> -m 'reason'`): blocked agents see it and can

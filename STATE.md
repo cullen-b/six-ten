@@ -16,7 +16,7 @@ work changes (replace, don't append); keep it under ~40 lines.
 ## In progress
 - Nothing open.
 
-## Known broken / limits
+## Known broken
 - Hermes has no turn-end hook: its leftovers get committed by other agents.
 - Codex, OpenCode and Hermes have no peer-messaging channel; stalled holders there need the user's OK
   to release (`six-ten release --agent`).

@@ -185,7 +185,24 @@ branch. six-ten changes the workflow to fit:
 - **New agents catch up from `STATE.md`.** Commit a short `STATE.md` (works / in progress / known
   broken / don't try) and agents keep it current: one that commits in a session where nobody touched
   it is asked once to rewrite what its work changed (replace, don't append). Agents are told to read
-  it, plus `six-ten log`, before they start. Repos without a `STATE.md` are left alone.
+  it, plus `six-ten log`, before they start. Repos without a `STATE.md` are left alone. A starter
+  (the protocol teaches agents this layout, so you can also just ask one to write it):
+
+  ```markdown
+  # State of <project>
+
+  ## Works
+  - Login, sync and export; verified on iOS and Android.
+
+  ## In progress
+  - Offline mode: queue written, replay not wired up.
+
+  ## Known broken
+  - Export times out over ~10k rows.
+
+  ## Don't try
+  - SQLite WAL mode: corrupted the cache under two writers (see the 2026-10-12 session).
+  ```
 - **Other agents' work in progress is visible.** A test can fail in a file another agent is halfway
   through. `six-ten status` shows which files those are, whether their agent is still working, and
   that they aren't yours to fix.
