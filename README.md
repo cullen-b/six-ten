@@ -44,7 +44,9 @@ Separate worktrees avoid all of this by giving up on sharing a checkout. six-ten
 |---|---|
 | **File leases** | The first agent to edit a file holds it. Others are refused with the holder's name and when it was last active, and are told to work on other files or call `six_ten_wait`. Races have exactly one winner. Claim with `-m "<reason>"` so blocked agents see the why. |
 | **Agent-to-agent nudges** | When an agent is refused a file, six-ten tells the holder someone is waiting, on its next tool call or turn, in every harness (hooks deliver it; MCP-only harnesses get it in their next tool reply). If the holder seems stalled, the refusal names how to wake it: its T3 Code thread (found from T3's logs) or its Claude Code session name for `SendMessage` (from `~/.claude/sessions`), or a thread it recorded with `six_ten_contact`. An agent that ends its turn still blocked is sent back once to retry the file or say it's no longer needed. |
-| **Decisions** | `six-ten decide "<text>"` records a decision (and `six_ten_decide` from any agent) in the event feed, so it outlives the chat session. |
+| **Decisions** | `six-ten decide "<text>"` records a decision (and `six_ten_decide` from any agent) in the event feed, so it outlives the chat session. `six-ten finish` copies the session's decisions into the merge commit, so they travel with the repo. |
+| **Trail** | `six-ten log` shows what agents did here: the session in progress, then each merged session with its commits and decisions, newest first. It is read from git, so it never conflicts or goes stale. |
+| **STATE.md** | Commit a short `STATE.md` (works / in progress / known broken / don't try) and it becomes the repo's current picture: an agent that commits in a session where nobody touched it is asked once (right after its commit, or at turn end) to rewrite what its work changed. Repos without one are left alone. |
 | **Change notes** | When another agent changes a file you've read, you get a compact diff once: after your next tool call, at your next turn, or in your `six_ten_wait` result. |
 | **Stale-write stop** | About to write a file that changed since you read it? That write is refused once with the diff, and you keep the lease while you re-read. The retry goes through. |
 | **Shell coverage** | `sed -i`, `perl -pi`, `>`/`>>`, `tee`, `mv`, `cp`, `rm` and `apply_patch` heredocs count as edits, so a refusal can't be dodged through the shell. |
@@ -361,7 +363,8 @@ six-ten stats                    counts from the event log (in a repo, or each r
 six-ten notify [on|off]          desktop notifications for this repo (off by default)
 six-ten claim <paths>            claim manually; exit 2 with the reason if another agent holds any of them
 six-ten claim <paths> -m "<why>"  claim with a reason blocked agents can see
-six-ten decide "<text>"          record a decision in the event feed
+six-ten decide "<text>"          record a decision in the event feed (and the next finish's merge commit)
+six-ten log [-n N]               the trail: session in progress, then merged sessions with commits and decisions
 six-ten wake [--at T | --minutes N] [--provider P] [task]   sleep until T, N minutes, or the usage reset
 six-ten usage                    Claude Code's and Codex's last-reported usage and reset times
 six-ten wait <paths> [--timeout S]

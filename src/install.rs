@@ -15,6 +15,10 @@ const PROTOCOL: &str = "## Working alongside other agents (six-ten)
 
 Several agents may share this checkout; six-ten keeps you from colliding.
 
+- New here? Read `STATE.md` if the repo has one (where things stand now) and `six-ten log` (what
+  earlier sessions did and decided). If your work changes that picture, rewrite the lines of
+  `STATE.md` it affects (replace, don't append) and commit it with your work.
+
 - Just edit. Edits are claimed automatically; claim files first only if `six_ten_claim` is in your
   tool list.
 - Say why when you claim (`six-ten claim <path> -m 'reason'`): blocked agents see it and can

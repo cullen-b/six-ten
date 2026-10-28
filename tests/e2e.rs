@@ -2293,3 +2293,86 @@ fn an_agent_in_one_repo_wraps_up_its_edits_in_another() {
     let status = String::from_utf8(six(&two, "x", &["status"]).stdout).unwrap();
     assert!(status.contains("no files are being edited"), "{status}");
 }
+
+#[test]
+fn the_trail_keeps_decisions_and_state_md_is_kept_current() {
+    let dir = repo();
+    git(&dir, &["switch", "-q", "-c", "main"]);
+    fs::write(dir.join("STATE.md"), "# State\n- works: a\n").unwrap();
+    git(&dir, &["add", "STATE.md"]);
+    assert!(commit(&dir, "human", "Add STATE.md").status.success());
+
+    six(&dir, "alice", &["session"]);
+    six(&dir, "alice", &["decide", "keep a.rs plain text"]);
+    edit_now(&dir, "alice", "src/a.rs", "a\nalice\n");
+    git(&dir, &["add", "src/a.rs"]);
+    assert!(
+        commit(&dir, "alice", "Teach a.rs about alice")
+            .status
+            .success()
+    );
+    let log = String::from_utf8(six(&dir, "alice", &["log"]).stdout).unwrap();
+    assert!(
+        log.contains("read STATE.md")
+            && log.contains("not merged yet")
+            && log.contains("- Teach a.rs about alice [alice]")
+            && log.contains("- keep a.rs plain text [alice]"),
+        "{log}"
+    );
+
+    // Right after the commit, alice is asked once to bring STATE.md up to date.
+    let committed = hook(
+        &dir,
+        "alice",
+        "claude",
+        json!({"hook_event_name": "PostToolUse", "cwd": dir, "tool_name": "Bash",
+               "tool_input": {"command": "git commit -m 'Teach a.rs about alice'"}}),
+    );
+    let note = String::from_utf8_lossy(&committed.stdout);
+    assert!(note.contains("nobody has updated STATE.md"), "{note}");
+    // Already asked, so her turn end goes straight to the finish reminder.
+    let last = stop(&dir, "alice");
+    assert!(!stderr(&last).contains("STATE.md"), "{}", stderr(&last));
+    stop_uncommitted(&dir, "alice");
+
+    // An agent that never got the post-commit note is asked at turn end, once.
+    edit_now(&dir, "bob", "src/b.rs", "b\nbob\n");
+    git(&dir, &["add", "src/b.rs"]);
+    assert!(commit(&dir, "bob", "bob: b").status.success());
+    let asked = stop(&dir, "bob");
+    assert_eq!(asked.status.code(), Some(2));
+    assert!(
+        stderr(&asked).contains("nobody has updated STATE.md"),
+        "{}",
+        stderr(&asked)
+    );
+    edit_now(&dir, "bob", "STATE.md", "# State\n- works: a, b\n");
+    git(&dir, &["add", "STATE.md"]);
+    assert!(commit(&dir, "bob", "STATE.md: b works").status.success());
+    stop_uncommitted(&dir, "bob");
+
+    let out = six(&dir, "bob", &["finish"]);
+    assert_eq!(out.status.code(), Some(0), "{}", stderr(&out));
+    let body = out_text(&dir, &["log", "-1", "--format=%b"]);
+    assert!(
+        body.contains("Decisions:\n- keep a.rs plain text [alice]"),
+        "{body}"
+    );
+    let log = String::from_utf8(six(&dir, "carol", &["log"]).stdout).unwrap();
+    assert!(
+        !log.contains("not merged yet")
+            && log.contains("Merge agents/")
+            && log.contains("    - keep a.rs plain text [alice]")
+            && log.contains("Add STATE.md"),
+        "{log}"
+    );
+
+    // The next session starts with no decisions carried over.
+    six(&dir, "carol", &["session"]);
+    edit_now(&dir, "carol", "src/a.rs", "a\ncarol\n");
+    git(&dir, &["add", "src/a.rs"]);
+    assert!(commit(&dir, "carol", "carol: a").status.success());
+    let log = String::from_utf8(six(&dir, "carol", &["log"]).stdout).unwrap();
+    let pending = log.split("`main`, newest first").next().unwrap();
+    assert!(!pending.contains("plain text"), "{log}");
+}

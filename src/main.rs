@@ -9,6 +9,7 @@ mod mcp;
 mod policy;
 mod repos;
 mod store;
+mod trail;
 mod wake;
 
 use std::path::PathBuf;
@@ -64,6 +65,12 @@ enum Command {
     Decide { text: Vec<String> },
     /// Show who is editing what.
     Status,
+    /// What agents did here: the session in progress, then merged sessions with their commits and decisions.
+    Log {
+        /// How many commits of the default branch to show.
+        #[arg(long, short = 'n', default_value_t = 15)]
+        limit: usize,
+    },
     /// Record your chat thread (e.g. a T3 Code thread id) so agents you block can ask you to release files.
     Contact {
         thread: String,
@@ -278,6 +285,10 @@ fn run(command: Command) -> Result<u8> {
                 }
                 Command::Status => {
                     print!("{}", status_text(&store, &agent)?);
+                    Ok(0)
+                }
+                Command::Log { limit } => {
+                    print!("{}", trail::log_text(&store, limit)?);
                     Ok(0)
                 }
                 Command::Watch { history } => events::watch(&store, history).map(|_| 0),
