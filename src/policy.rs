@@ -609,12 +609,24 @@ pub fn stop(store: &Store, agent: &Agent) -> Result<Decision> {
             return Ok(Decision::Deny(text));
         }
     }
-    let reminder = stop_reminder(store, agent)?.map(|r| {
-        let (Reminder::Commit(text) | Reminder::Finish(text)) = r;
+    let again = |text: String| {
         format!(
             "{text}\nOnce that's done, end your turn with your full summary again, even if you already wrote \
              it: the user reads your last message, and this reminder pushed your summary up out of view."
         )
+    };
+    let reminder = stop_reminder(store, agent)?;
+    // STATE.md comes after committing, and before finishing merges the session.
+    if !matches!(reminder, Some(Reminder::Commit(_)))
+        && let Some(text) = crate::trail::state_reminder(store, agent)
+        && store.first_reminder(&format!("{}#state", agent.id), &text)?
+    {
+        store.log(&agent.id, "reminded", "update STATE.md".into())?;
+        return Ok(Decision::Deny(again(text)));
+    }
+    let reminder = reminder.map(|r| {
+        let (Reminder::Commit(text) | Reminder::Finish(text)) = r;
+        again(text)
     });
     match reminder {
         Some(text) if store.first_reminder(&agent.id, &text)? => {
@@ -637,6 +649,16 @@ enum Reminder {
 
 /// After a commit: tells the last agent working to finish now, before it writes its summary.
 pub fn finish_nudge(store: &Store, agent: &Agent, decision: Decision) -> Result<Decision> {
+    // Asked here rather than at Stop where possible: T3 Code shows any Stop refusal as an error.
+    let decision = match crate::trail::state_reminder(store, agent) {
+        Some(text) if store.first_reminder(&format!("{}#state", agent.id), &text)? => {
+            store.log(&agent.id, "reminded", "update STATE.md".into())?;
+            decision.and(Decision::Note(format!(
+                "{text}\nDo it before you finish or write your final summary."
+            )))
+        }
+        _ => decision,
+    };
     let Some(Reminder::Finish(text)) = stop_reminder(store, agent)? else {
         return Ok(decision);
     };
@@ -826,29 +848,11 @@ pub fn finish(store: &Store, agent: &Agent) -> Result<Decision> {
         );
     }
     if ahead > 0 {
-        // The merge commit lists the session's commits, so `git log --first-parent` reads as a changelog.
-        let log = git::run(
-            root,
-            &[
-                "log",
-                "--reverse",
-                "--format=%s%x1f%(trailers:key=Agent,valueonly,separator=%x2C )",
-                &format!("{default}..{branch}"),
-            ],
-        )
-        .unwrap_or_default();
-        let log: String = log
-            .lines()
-            .filter_map(|l| {
-                let (subject, agent) = l.split_once('\x1f')?;
-                Some(if agent.is_empty() {
-                    format!("- {subject}\n")
-                } else {
-                    format!("- {subject} [{agent}]\n")
-                })
-            })
-            .collect();
-        let msg = format!("Merge {branch}\n\n{log}");
+        // The merge commit lists the session's commits and decisions, so `six-ten log` reads as a changelog.
+        let msg = format!(
+            "Merge {branch}\n\n{}",
+            crate::trail::merge_body(store, &default, &branch)
+        );
         if let Err(e) = git::run(root, &["merge", "-q", "--no-ff", "-m", &msg, &branch]) {
             let conflicts =
                 git::run(root, &["diff", "--name-only", "--diff-filter=U"]).unwrap_or_default();
