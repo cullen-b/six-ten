@@ -10,7 +10,9 @@ whole folder of repos, without them stepping on each other's toes.
 six-ten is a small Rust binary that sits between your agents and your working tree. Before an agent
 edits a file, six-ten checks whether another agent is already editing it. If it is, the agent is told
 who has the file and goes to work on something else, or waits. Agents are also told when someone else
-changes a file they've read, and they can't wipe out or commit each other's uncommitted work.
+changes a file they've read, and they can't wipe out or commit each other's uncommitted work. And
+when a fresh agent shows up, it can catch up in seconds: `STATE.md` says where the software stands,
+and `six-ten log` says which agent did what, and what they decided, to get it there.
 
 It works across harnesses and model providers at the same time: **Claude Code, Codex, OpenCode and
 Hermes** are supported out of the box, and anything with MCP or tool hooks can be added.
@@ -35,6 +37,8 @@ Several agents in one checkout go wrong in predictable ways:
 - **Destroyed work.** One agent runs `git stash`, `checkout .` or `reset --hard` and takes everyone
   else's uncommitted changes with it.
 - **Tangled commits.** `git add -A` sweeps another agent's half-finished files into your commit.
+- **Lost context.** The next agent starts cold. It doesn't know what earlier agents built, what they
+  decided, or which dead end they already tried, so it rediscovers it the hard way, or repeats it.
 
 Separate worktrees avoid all of this by giving up on sharing a checkout. six-ten lets agents share one.
 
@@ -174,8 +178,14 @@ branch. six-ten changes the workflow to fit:
   in the session with the agent that made it, so `main`'s history reads as a per-session changelog:
 
   ```sh
-  git log --first-parent main          # one merge per session, each listing its commits
+  six-ten log                          # one entry per session: its commits, agents and decisions
   ```
+  Decisions recorded with `six-ten decide` during the session go into that merge commit too, so the
+  why travels with the repo instead of dying with the chat.
+- **New agents catch up from `STATE.md`.** Commit a short `STATE.md` (works / in progress / known
+  broken / don't try) and agents keep it current: one that commits in a session where nobody touched
+  it is asked once to rewrite what its work changed (replace, don't append). Agents are told to read
+  it, plus `six-ten log`, before they start. Repos without a `STATE.md` are left alone.
 - **Other agents' work in progress is visible.** A test can fail in a file another agent is halfway
   through. `six-ten status` shows which files those are, whether their agent is still working, and
   that they aren't yours to fix.
@@ -430,6 +440,8 @@ If you've run five agents in one repo, you've driven it.
 | Traffic alert: lane shift ahead | Change note: someone changed a file you read |
 | Nobody closes the freeway at rush hour | No `git stash` / `reset --hard` while others are driving |
 | The morning traffic report | `six-ten watch` |
+| The road-conditions sign at the on-ramp | `STATE.md`: where things stand before you merge in |
+| The trip log | `six-ten log`: who drove where, and why |
 | Inside the Loop | Inside `.git/six-ten/`: no server, no daemon |
 
 ## License
