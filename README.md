@@ -71,7 +71,8 @@ Paste this into Claude Code, Codex, OpenCode or Hermes:
 
 [`AGENTS.txt`](AGENTS.txt) walks the agent through it: check prerequisites, build, ask you whether to
 install machine-wide or for one repo, back up your configs, install, verify, and list the steps only
-you can do. It also offers to update your agent instructions for a shared checkout.
+you can do. It also points out rules in your agent instructions that conflict with a shared checkout
+(worktrees or branches per agent, `git add -A`, `git stash`, ...) and suggests fixes for you to approve.
 
 ### Or do it yourself
 
@@ -85,6 +86,9 @@ six-ten install all --global     # every repo on this machine, for every harness
 This writes each harness's user-level config (`~/.claude`, `~/.codex`, `~/.config/opencode`,
 `~/.hermes`). It keeps your existing hooks, settings and JSONC comments, and running it again changes
 nothing. Back up those files first if you'd like a one-step undo.
+
+It ends with a `conflicts:` list: rules in your agent instructions that work against a shared
+checkout, each with a suggested fix. It never edits them for you.
 
 For a single repo instead, run `six-ten install all` inside it and commit the generated files. Pick one
 scope per harness; installing both makes each hook run twice.

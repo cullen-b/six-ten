@@ -3,7 +3,7 @@ SIX-TEN INSTALL GUIDE FOR AGENTS
 
 You are installing six-ten, a tool that lets several coding agents (Claude Code, Codex, OpenCode,
 Hermes, ...) work in one git checkout without clobbering each other. Follow these steps in order.
-Ask the user before step 3, and report back at the end. Don't skip the backup.
+Ask the user before step 3 and before changing their instructions in step 8, and report back at the end. Don't skip the backup.
 
 1. CHECK PREREQUISITES
    - OS must be macOS or Linux.
@@ -58,18 +58,27 @@ Ask the user before step 3, and report back at the end. Don't skip the backup.
      feed, and `six-ten notify on` turns on desktop
      notifications.
 
-8. OFFER TO UPDATE THEIR AGENT INSTRUCTIONS (never edit them without asking)
-   Look in ~/.claude/CLAUDE.md, ~/.codex/AGENTS.md, ~/.config/opencode/AGENTS.md, ~/.hermes/AGENTS.md
-   and the repos' own AGENTS.md / CLAUDE.md for rules that conflict with a shared checkout:
+8. FIX CONFLICTING AGENT RULES (suggest the fix; never edit without asking)
+   The install ends with a "conflicts:" section: each rule in the user's agent instructions that
+   works against a shared checkout, as file:line, the rule, and a suggestion. "none found" means the
+   files the installer knows were clean. It can't see everything, so also look yourself at:
+   - the repos' own AGENTS.md / CLAUDE.md after a machine-wide install, plus skills and subagent
+     definitions (`isolation: worktree`) the user keeps elsewhere;
+   - apps that start each agent in its own worktree or branch (T3 Code, Conductor, Cursor background
+     agents, Claude Code `--worktree`): they should start agents in the main checkout instead;
+   - rules the scan may have missed or read wrong, e.g. a negation it didn't catch.
+   Rules that conflict:
    - "one worktree / clone / branch per agent": agents now share one checkout and one branch.
    - Creating or switching branches mid-session (`git checkout -b`, `git switch`): six-ten refuses
-     these while other agents are active.
+     these while other agents are active; `six-ten session` picks the branch.
    - Cleanup that discards everything (`git restore .`, `git checkout .`, `git stash`,
      `git reset --hard`, `git clean`): this destroys other agents' work. Replace it with discarding
      only the agent's own files, by path.
    - `git add -A` / `git commit -a`: agents must stage their own paths only.
-   Show the user the proposed changes and apply them only once they agree. The README's "Workflow"
-   section describes the recommended rules.
+   - `git pull` mid-session: pull only when no other agent is active.
+   For each conflict, show the user the current rule and your proposed rewrite (or removal), and
+   apply them only once they agree. Then run the install again: it should report "none found". The
+   README's "Workflow" section describes the recommended rules.
 
 UNINSTALL: restore the backed-up files; delete ~/.config/opencode/plugins/six-ten.ts and
 ~/.hermes/plugins/six-ten/; run `claude mcp remove six-ten` and `hermes mcp remove six-ten`; remove
