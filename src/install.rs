@@ -131,6 +131,15 @@ pub fn run(harness: &str, repo: &Path, global: bool) -> Result<()> {
             Scope::Global(_) => crate::store::mark_hooked_globally(name)?,
         }
     }
+    let mut files: Vec<PathBuf> = Vec::new();
+    for name in &names {
+        for f in instruction_files(name, &scope) {
+            if f.is_file() && !files.contains(&f) {
+                files.push(f);
+            }
+        }
+    }
+    report_conflicts(&files);
     if Command::new(BIN).arg("--version").output().is_err() {
         eprintln!(
             "warning: `{BIN}` is not on PATH; harness hooks will not find it. Run `cargo install --path .` in the six-ten repo."
@@ -223,9 +232,7 @@ fn claude(scope: &Scope) -> Result<()> {
 
 fn codex(scope: &Scope) -> Result<()> {
     let dir = match scope {
-        Scope::Global(home) => std::env::var("CODEX_HOME")
-            .map(PathBuf::from)
-            .unwrap_or_else(|_| home.join(".codex")),
+        Scope::Global(home) => codex_home(home),
         Scope::Repo(root) => root.join(".codex"),
     };
     let hooks_file = dir.join("hooks.json");
@@ -391,16 +398,7 @@ fn hermes(scope: &Scope) -> Result<()> {
     if let Scope::Repo(root) = scope {
         protocol_block(&root.join("AGENTS.md"))?;
     }
-    let home = std::env::var("HERMES_HOME")
-        .ok()
-        .filter(|h| !h.is_empty())
-        .map(PathBuf::from)
-        .or_else(|| {
-            std::env::var("HOME")
-                .ok()
-                .map(|h| Path::new(&h).join(".hermes"))
-        })
-        .context("cannot locate the Hermes home (set HERMES_HOME)")?;
+    let home = hermes_home().context("cannot locate the Hermes home (set HERMES_HOME)")?;
     if let Scope::Global(_) = scope {
         // Hermes's own global instructions, if the user keeps them.
         let agents = home.join("AGENTS.md");
@@ -465,6 +463,257 @@ fn hermes(scope: &Scope) -> Result<()> {
         );
     }
     Ok(())
+}
+
+fn codex_home(home: &Path) -> PathBuf {
+    std::env::var("CODEX_HOME")
+        .map(PathBuf::from)
+        .unwrap_or_else(|_| home.join(".codex"))
+}
+
+fn hermes_home() -> Option<PathBuf> {
+    std::env::var("HERMES_HOME")
+        .ok()
+        .filter(|h| !h.is_empty())
+        .map(PathBuf::from)
+        .or_else(|| {
+            std::env::var("HOME")
+                .ok()
+                .map(|h| Path::new(&h).join(".hermes"))
+        })
+}
+
+/// Instruction files a harness reads, where a user's rule can contradict the shared checkout.
+fn instruction_files(name: &str, scope: &Scope) -> Vec<PathBuf> {
+    let md_in = |dir: PathBuf| -> Vec<PathBuf> {
+        let mut found: Vec<PathBuf> = fs::read_dir(dir)
+            .into_iter()
+            .flatten()
+            .flatten()
+            .map(|e| e.path())
+            .filter(|p| p.extension().is_some_and(|x| x == "md"))
+            .collect();
+        found.sort();
+        found
+    };
+    let mut files = Vec::new();
+    match (name, scope) {
+        ("claude", Scope::Repo(root)) => {
+            files.extend([
+                root.join("CLAUDE.md"),
+                root.join("CLAUDE.local.md"),
+                root.join(".claude/CLAUDE.md"),
+            ]);
+            files.extend(md_in(root.join(".claude/agents")));
+            files.extend(md_in(root.join(".claude/rules")));
+        }
+        ("claude", Scope::Global(home)) => {
+            files.push(home.join(".claude/CLAUDE.md"));
+            files.extend(md_in(home.join(".claude/agents")));
+            files.extend(md_in(home.join(".claude/rules")));
+        }
+        ("codex", Scope::Global(home)) => {
+            let dir = codex_home(home);
+            files.extend([dir.join("AGENTS.md"), dir.join("AGENTS.override.md")]);
+        }
+        ("opencode", Scope::Global(_)) => {
+            if let Some(dir) = config_home().map(|c| c.join("opencode")) {
+                files.push(dir.join("AGENTS.md"));
+                files.extend(md_in(dir.join("agent")));
+                files.extend(md_in(dir.join("agents")));
+            }
+        }
+        ("hermes", Scope::Global(_)) => files.extend(hermes_home().map(|h| h.join("AGENTS.md"))),
+        ("git", _) | ("generic", Scope::Global(_)) => {}
+        (_, Scope::Repo(root)) => {
+            files.push(root.join("AGENTS.md"));
+            if name == "opencode" {
+                files.extend(md_in(root.join(".opencode/agent")));
+                files.extend(md_in(root.join(".opencode/agents")));
+            }
+        }
+        _ => {}
+    }
+    files
+}
+
+/// Rules that work against one shared checkout: (phrases, what to suggest instead).
+const CONFLICTS: [(&[&str], &str); 6] = [
+    (
+        &["worktree"],
+        "agents share one checkout and six-ten refuses worktrees: drop this rule",
+    ),
+    (
+        &["clone per", "clone for each", "separate clone", "own clone"],
+        "agents share one checkout: drop per-agent clones",
+    ),
+    (
+        &[
+            "checkout -b",
+            "git switch",
+            "branch per",
+            "branch for each",
+            "own branch",
+            "new branch",
+            "feature branch",
+        ],
+        "six-ten picks the branch (`six-ten session`): agents shouldn't create or switch branches",
+    ),
+    (
+        &[
+            "git stash",
+            "reset --hard",
+            "git clean",
+            "checkout .",
+            "restore .",
+        ],
+        "this discards other agents' work too: discard only your own files, by path",
+    ),
+    (
+        &["add -a", "add --all", "add .", "commit -a"],
+        "this commits other agents' work too: stage your own paths (`git add <paths>`)",
+    ),
+    (
+        &["git pull"],
+        "pulling moves files under agents mid-edit: pull only when no other agent is active",
+    ),
+];
+
+/// Prints each conflicting rule with a suggested fix; never edits the user's files.
+fn report_conflicts(files: &[PathBuf]) {
+    let found: Vec<(String, &str)> = files
+        .iter()
+        .flat_map(|f| {
+            let text = fs::read_to_string(f).unwrap_or_default();
+            find_conflicts(&text)
+                .into_iter()
+                .map(move |(line, quote, fix)| {
+                    (format!("{}:{line}  \"{quote}\"", f.display()), fix)
+                })
+        })
+        .collect();
+    if found.is_empty() {
+        println!(
+            "conflicts: none found in {} agent instruction file(s)",
+            files.len()
+        );
+        return;
+    }
+    println!(
+        "conflicts: {} rule(s) in your agent instructions work against a shared checkout:",
+        found.len()
+    );
+    for (at, fix) in found {
+        println!("  {at}\n    suggestion: {fix}");
+    }
+    println!(
+        "  six-ten didn't change them. Edit them yourself, or ask your agent to (AGENTS.txt step 8)."
+    );
+}
+
+/// Conflicting rules in `text` outside six-ten's own block: (line, quoted sentence, suggestion).
+fn find_conflicts(text: &str) -> Vec<(usize, String, &'static str)> {
+    // Group lines into paragraphs / list items so a rule wrapped over lines reads as one.
+    let mut units: Vec<(usize, String)> = Vec::new();
+    let (mut in_block, mut in_fence, mut open) = (false, false, false);
+    for (i, line) in text.lines().enumerate() {
+        let t = line.trim();
+        if t.contains(BEGIN) {
+            in_block = true;
+        }
+        if in_block {
+            in_block = !t.contains(END);
+            open = false;
+            continue;
+        }
+        let fence = t.starts_with("```");
+        in_fence ^= fence;
+        let item = t.starts_with('#')
+            || t.starts_with("- ")
+            || t.starts_with("* ")
+            || t.starts_with("+ ")
+            || t.split_once(". ")
+                .is_some_and(|(n, _)| !n.is_empty() && n.chars().all(|c| c.is_ascii_digit()))
+            // A frontmatter key (`isolation: worktree`).
+            || t.split_once(": ").is_some_and(|(k, _)| {
+                !k.is_empty() && k.chars().all(|c| c.is_ascii_alphanumeric() || "-_".contains(c))
+            });
+        if t.is_empty() || fence || t == "---" {
+            open = false;
+            continue;
+        }
+        if open && !item && !in_fence {
+            let unit = &mut units.last_mut().expect("open unit").1;
+            unit.push(' ');
+            unit.push_str(t);
+        } else {
+            units.push((i + 1, t.to_string()));
+        }
+        open = !in_fence;
+    }
+    let mut found = Vec::new();
+    for (line, unit) in units {
+        for sentence in sentences(&unit) {
+            let lower = sentence.to_lowercase().replace('’', "'");
+            if negated(&lower) {
+                continue;
+            }
+            for (phrases, fix) in CONFLICTS {
+                let hit = phrases.iter().any(|p| has_phrase(&lower, p));
+                if hit && !found.iter().any(|(l, _, f)| *l == line && *f == fix) {
+                    let mut quote: String = sentence.chars().take(100).collect();
+                    if quote.len() < sentence.len() {
+                        quote.push('…');
+                    }
+                    found.push((line, quote, fix));
+                }
+            }
+        }
+    }
+    found
+}
+
+/// Splits on `. `, `; `, `! ` and `? `, but not `git add . ` (a space before the dot).
+fn sentences(unit: &str) -> Vec<&str> {
+    let b = unit.as_bytes();
+    let mut out = Vec::new();
+    let mut start = 0;
+    for i in 1..b.len().saturating_sub(1) {
+        if matches!(b[i], b'.' | b';' | b'!' | b'?') && b[i + 1] == b' ' && b[i - 1] != b' ' {
+            out.push(unit[start..=i].trim());
+            start = i + 1;
+        }
+    }
+    out.push(unit[start..].trim());
+    out
+}
+
+fn negated(sentence: &str) -> bool {
+    sentence
+        .split(|c: char| !(c.is_alphanumeric() || c == '\''))
+        .any(|w| {
+            w.ends_with("n't")
+                || matches!(
+                    w,
+                    "never" | "not" | "no" | "avoid" | "refuse" | "refuses" | "without" | "instead"
+                )
+        })
+}
+
+/// `phrase` in `s`, not starting mid-word or as a flag (`--worktree`); a phrase ending in `.`
+/// (`git add .`) must not run on into a path (`.env`).
+fn has_phrase(s: &str, phrase: &str) -> bool {
+    s.match_indices(phrase).any(|(at, _)| {
+        s[..at]
+            .chars()
+            .next_back()
+            .is_none_or(|c| !(c.is_alphanumeric() || c == '-'))
+            && (!phrase.ends_with('.')
+                || s[at + phrase.len()..]
+                    .chars()
+                    .next()
+                    .is_none_or(|c| !(c.is_alphanumeric() || "/_.-".contains(c))))
+    })
 }
 
 fn add_unique(obj: &mut Value, key: &str, items: &[&str]) -> Result<()> {
@@ -624,4 +873,47 @@ fn git_out(dir: &Path, args: &[&str]) -> Result<String> {
         );
     }
     Ok(String::from_utf8(out.stdout)?)
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    fn lines(text: &str) -> Vec<usize> {
+        find_conflicts(text)
+            .into_iter()
+            .map(|(l, _, _)| l)
+            .collect()
+    }
+
+    #[test]
+    fn flags_rules_that_split_or_sweep_the_checkout() {
+        let text = "# Rules\n\n- Use a git worktree for each task.\n- Before finishing, run\n  `git add -A` and commit.\n\
+                    - Create a new branch per feature.\n- Clean up with `git stash`.\n\n```sh\ngit worktree add ../x\n```\n\
+                    ---\nname: builder\nisolation: worktree\n";
+        assert_eq!(lines(text), vec![3, 4, 6, 7, 10, 14]);
+        assert_eq!(find_conflicts(text)[5].1, "isolation: worktree");
+    }
+
+    #[test]
+    fn ignores_negated_rules_paths_and_six_tens_block() {
+        let text = format!(
+            "- Don't create a worktree or clone per agent. Never create\n  worktrees: six-ten refuses them.\n\
+             - Never `git stash` or `git clean -fd`.\n- Edit .env, then `git add .env.example`.\n\
+             - Agents mustn't switch branches.\n- Discard by path (`git restore --worktree -- <paths>`).\n{BEGIN}\n- use a worktree\n{END}\n"
+        );
+        assert!(
+            find_conflicts(&text).is_empty(),
+            "{:?}",
+            find_conflicts(&text)
+        );
+    }
+
+    #[test]
+    fn negation_is_per_sentence() {
+        assert_eq!(
+            lines("- Never push to main. Use `git worktree add` per task.\n"),
+            vec![1]
+        );
+    }
 }

@@ -10,6 +10,8 @@ work changes (replace, don't append); keep it under ~40 lines.
   into `main` with the session's commits and decisions in the merge body.
 - `six-ten log` trail; one STATE.md reminder per agent per session (after its commit, else at turn end).
 - Folder-of-repos sessions: hooks and MCP route each path to its own repo.
+- `install` ends with a `conflicts:` list: rules in the user's agent instructions (worktree or branch
+  per agent, `git add -A`, `git stash`, ...) with a suggested fix each; it never edits them.
 - `six-ten wake` / `six_ten_wake` until a time or usage reset; works outside a repo.
 - Live-verified: Claude Code, Codex, OpenCode 1.x and 2.x (plugin serves V1 and V2 APIs), Hermes, T3 Code.
 
