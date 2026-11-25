@@ -1,0 +1,12 @@
+# acb: begin (managed by acb; edit .acbrules instead)
+.env filter=acb diff=acb
+.env.* filter=acb diff=acb
+*.env filter=acb diff=acb
+.env.example -filter -diff
+*.pem filter=acb diff=acb-hidden
+*.key filter=acb diff=acb-hidden
+id_rsa* filter=acb diff=acb-hidden
+.acbrules -filter -diff
+/.acbkeys -filter -diff
+/.gitattributes -filter -diff
+# acb: end

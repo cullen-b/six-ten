@@ -1,0 +1,33 @@
+# What acb records and what agents may see. Each line is `<level> <pattern>`, with the patterns
+# of .gitignore: *, **, ?, [abc], a trailing / for folders, a leading / to anchor to this folder.
+# The last matching line wins. Any folder can have its own .acbrules for the paths below it.
+#
+# Built-in levels:
+#   track   recorded and shared, agents read it (every file that no rule names)
+#   ignore  not recorded at all
+#   local   recorded on this machine only, never exported or synced
+#   secret  shared with its values sealed; agents see the keys and layout, not the values
+#   vault   shared and sealed whole; agents see nothing
+# Sealed values are encrypted whenever they leave this machine; `acb key` shows who can open them.
+# This root file can add or redefine levels: `level <name> = <words>`, where the words are
+# shared, local or untracked; readable, masked or hidden; and `sealed`. For example:
+#   level config = shared readable sealed
+# ACB_READ=secret,vault (or *) lets a reader, such as a trusted agent, see those levels in full.
+
+ignore .DS_Store
+ignore node_modules/
+ignore target/
+ignore dist/
+ignore build/
+ignore __pycache__/
+ignore .venv/
+ignore *.pyc
+ignore *.log
+
+secret .env
+secret .env.*
+secret *.env
+track .env.example
+vault *.pem
+vault *.key
+vault id_rsa*
